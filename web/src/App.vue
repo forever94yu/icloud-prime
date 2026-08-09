@@ -4,13 +4,17 @@ import {
   AlertCircle,
   CheckCircle2,
   Copy,
+  CalendarClock,
   Folder,
   Inbox,
   Loader2,
   Mail,
+  Pause,
   Plus,
+  Play,
   RefreshCw,
   ShieldCheck,
+  Trash2,
 } from "lucide-vue-next";
 
 type ApiResponse<T> = {
@@ -82,6 +86,40 @@ type CreateData = {
   account_id: string;
 };
 
+type BatchCreateData = {
+  account_id: string;
+  requested: number;
+  created: CreateData[];
+  created_count: number;
+  skipped_count: number;
+  remaining_this_hour: number;
+  message?: string;
+  last_error?: string;
+};
+
+type CreateJob = {
+  id: string;
+  account_id: string;
+  label_prefix?: string;
+  mode: "duration" | "daily_window";
+  status: "running" | "paused" | "completed" | "error";
+  duration_hours?: number;
+  start_time?: string;
+  end_time?: string;
+  created_count: number;
+  last_error?: string;
+  started_at?: string;
+  ended_at?: string;
+  next_run_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type CreateJobsData = {
+  jobs: CreateJob[];
+  remaining_this_hour?: number;
+};
+
 const defaultFolders: FolderOption[] = [
   { name: "all", role: "all" },
   { name: "INBOX", role: "inbox" },
@@ -96,6 +134,14 @@ const selectedAccountId = ref("");
 const selectedAlias = ref("");
 const selectedFolder = ref("all");
 const newLabel = ref("");
+const batchCount = ref(5);
+const createJobs = ref<CreateJob[]>([]);
+const remainingThisHour = ref(5);
+const jobMode = ref<"duration" | "daily_window">("duration");
+const durationHours = ref(12);
+const dailyStart = ref("09:00");
+const dailyEnd = ref("18:00");
+const jobLabelPrefix = ref("自动创建");
 const notice = ref("");
 const error = ref("");
 const busy = ref({
@@ -103,6 +149,9 @@ const busy = ref({
   aliases: false,
   folders: false,
   create: false,
+  batch: false,
+  jobs: false,
+  jobAction: false,
   inbox: false,
 });
 const inboxMeta = ref({ method: "", count: 0, folder: "all" });
@@ -193,6 +242,20 @@ async function loadAliases() {
   }
 }
 
+async function loadCreateJobs() {
+  if (!selectedAccountId.value) return;
+  busy.value.jobs = true;
+  try {
+    const data = await api<CreateJobsData>(`/api/create/jobs?account_id=${selectedAccountId.value}`);
+    createJobs.value = data.jobs ?? [];
+    remainingThisHour.value = data.remaining_this_hour ?? remainingThisHour.value;
+  } catch (err) {
+    setError(err);
+  } finally {
+    busy.value.jobs = false;
+  }
+}
+
 async function createAlias() {
   if (!selectedAccountId.value) return;
   busy.value.create = true;
@@ -208,11 +271,114 @@ async function createAlias() {
     selectedFolder.value = "all";
     newLabel.value = "";
     await loadAliases();
+    await loadCreateJobs();
     await loadInbox(created.email);
   } catch (err) {
     setError(err);
   } finally {
     busy.value.create = false;
+  }
+}
+
+async function createAliasBatch() {
+  if (!selectedAccountId.value) return;
+  busy.value.batch = true;
+  clearFeedback();
+  try {
+    const labelPrefix = newLabel.value.trim() || `Web 管理台 ${new Date().toLocaleString()}`;
+    const data = await api<BatchCreateData>("/api/create/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        account_id: selectedAccountId.value,
+        count: Math.min(5, Math.max(1, Number(batchCount.value) || 1)),
+        label_prefix: labelPrefix,
+      }),
+    });
+    remainingThisHour.value = data.remaining_this_hour;
+    const lastCreated = data.created.at(-1);
+    if (lastCreated) {
+      selectedAlias.value = lastCreated.email;
+      selectedFolder.value = "all";
+    }
+    notice.value =
+      data.message ||
+      `已创建 ${data.created_count} 个别名${data.skipped_count ? `，跳过 ${data.skipped_count} 个` : ""}`;
+    await loadAliases();
+    await loadCreateJobs();
+    if (lastCreated) await loadInbox(lastCreated.email);
+  } catch (err) {
+    setError(err);
+  } finally {
+    busy.value.batch = false;
+  }
+}
+
+async function saveCreateJob() {
+  if (!selectedAccountId.value) return;
+  busy.value.jobAction = true;
+  clearFeedback();
+  try {
+    const body =
+      jobMode.value === "duration"
+        ? {
+            account_id: selectedAccountId.value,
+            label_prefix: jobLabelPrefix.value.trim() || "自动创建",
+            mode: jobMode.value,
+            duration_hours: Math.max(1, Number(durationHours.value) || 1),
+          }
+        : {
+            account_id: selectedAccountId.value,
+            label_prefix: jobLabelPrefix.value.trim() || "自动创建",
+            mode: jobMode.value,
+            start_time: dailyStart.value,
+            end_time: dailyEnd.value,
+          };
+    const job = await api<CreateJob>("/api/create/jobs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    notice.value = `任务已保存：${job.id}`;
+    await loadCreateJobs();
+  } catch (err) {
+    setError(err);
+  } finally {
+    busy.value.jobAction = false;
+  }
+}
+
+async function pauseCreateJob(job: CreateJob) {
+  await updateCreateJobStatus(job, "pause");
+}
+
+async function resumeCreateJob(job: CreateJob) {
+  await updateCreateJobStatus(job, "resume");
+}
+
+async function updateCreateJobStatus(job: CreateJob, action: "pause" | "resume") {
+  busy.value.jobAction = true;
+  clearFeedback();
+  try {
+    await api<CreateJob>(`/api/create/jobs/${job.id}/${action}`, { method: "POST" });
+    notice.value = action === "pause" ? "任务已暂停" : "任务已恢复";
+    await loadCreateJobs();
+  } catch (err) {
+    setError(err);
+  } finally {
+    busy.value.jobAction = false;
+  }
+}
+
+async function deleteCreateJob(job: CreateJob) {
+  busy.value.jobAction = true;
+  clearFeedback();
+  try {
+    await api<{ id: string }>(`/api/create/jobs/${job.id}`, { method: "DELETE" });
+    notice.value = "任务已删除";
+    await loadCreateJobs();
+  } catch (err) {
+    setError(err);
+  } finally {
+    busy.value.jobAction = false;
   }
 }
 
@@ -246,6 +412,7 @@ async function refreshAll() {
   await loadAccounts();
   await loadMailboxes();
   await loadAliases();
+  await loadCreateJobs();
   await loadInbox(selectedAlias.value);
 }
 
@@ -253,6 +420,7 @@ async function handleAccountChange() {
   selectedAlias.value = "";
   await loadMailboxes();
   await loadAliases();
+  await loadCreateJobs();
   await loadInbox();
 }
 
@@ -292,10 +460,23 @@ function folderLabel(optionOrName?: FolderOption | string) {
   return option?.name || String(optionOrName || "未知");
 }
 
+function jobModeLabel(job: CreateJob) {
+  return job.mode === "duration" ? `${job.duration_hours || 0} 小时` : `${job.start_time} - ${job.end_time}`;
+}
+
+function jobStatusLabel(status: CreateJob["status"]) {
+  if (status === "running") return "运行中";
+  if (status === "paused") return "已暂停";
+  if (status === "completed") return "已完成";
+  if (status === "error") return "异常";
+  return status;
+}
+
 onMounted(async () => {
   await loadAccounts();
   await loadMailboxes();
   await loadAliases();
+  await loadCreateJobs();
   await loadInbox();
 });
 </script>
@@ -383,6 +564,123 @@ onMounted(async () => {
             创建别名
           </button>
         </form>
+
+        <div class="batch-row">
+          <label class="compact-field">
+            <span>数量</span>
+            <input v-model.number="batchCount" class="input compact-input" type="number" min="1" max="5" />
+          </label>
+          <button class="ghost-button" type="button" :disabled="busy.batch || !selectedAccountId" @click="createAliasBatch">
+            <Loader2 v-if="busy.batch" class="spin" :size="16" />
+            <Plus v-else :size="16" />
+            批量创建
+          </button>
+          <span class="quota-pill">本小时剩余 {{ remainingThisHour }}</span>
+        </div>
+
+        <section class="job-section">
+          <div class="panel-heading">
+            <div class="panel-title small-title">
+              <CalendarClock :size="18" />
+              <span>自动创建</span>
+            </div>
+            <button class="ghost-button" type="button" :disabled="busy.jobs" @click="loadCreateJobs">
+              <RefreshCw :class="{ spin: busy.jobs }" :size="16" />
+              更新任务
+            </button>
+          </div>
+
+          <div class="job-form">
+            <input v-model="jobLabelPrefix" class="input" placeholder="任务标签前缀" aria-label="任务标签前缀" />
+            <div class="segmented-control" aria-label="任务模式">
+              <button
+                type="button"
+                :class="{ active: jobMode === 'duration' }"
+                @click="jobMode = 'duration'"
+              >
+                运行时长
+              </button>
+              <button
+                type="button"
+                :class="{ active: jobMode === 'daily_window' }"
+                @click="jobMode = 'daily_window'"
+              >
+                每日时段
+              </button>
+            </div>
+
+            <div v-if="jobMode === 'duration'" class="time-row">
+              <label class="compact-field">
+                <span>小时</span>
+                <input v-model.number="durationHours" class="input compact-input" type="number" min="1" />
+              </label>
+            </div>
+            <div v-else class="time-row">
+              <label class="compact-field grow">
+                <span>开始</span>
+                <input v-model="dailyStart" class="input" type="time" />
+              </label>
+              <label class="compact-field grow">
+                <span>结束</span>
+                <input v-model="dailyEnd" class="input" type="time" />
+              </label>
+            </div>
+
+            <button class="primary-button full-button" type="button" :disabled="busy.jobAction || !selectedAccountId" @click="saveCreateJob">
+              <Loader2 v-if="busy.jobAction" class="spin" :size="17" />
+              <Plus v-else :size="17" />
+              保存任务
+            </button>
+          </div>
+
+          <div v-if="busy.jobs" class="empty-state compact-empty">正在读取自动任务...</div>
+          <div v-else-if="createJobs.length === 0" class="empty-state compact-empty">当前账号没有自动创建任务。</div>
+          <div v-else class="job-list">
+            <article v-for="job in createJobs" :key="job.id" class="job-row">
+              <div class="job-main">
+                <strong>{{ job.label_prefix || "自动创建" }}</strong>
+                <small>{{ jobModeLabel(job) }}</small>
+                <small v-if="job.next_run_at">下次：{{ formatDate(job.next_run_at) }}</small>
+                <small v-if="job.last_error" class="danger-text">{{ job.last_error }}</small>
+              </div>
+              <div class="job-meta">
+                <span class="tag" :class="{ muted: job.status !== 'running' }">{{ jobStatusLabel(job.status) }}</span>
+                <small>{{ job.created_count }} 个</small>
+                <div class="job-actions">
+                  <button
+                    v-if="job.status === 'running'"
+                    class="mini-button icon-mini"
+                    type="button"
+                    :disabled="busy.jobAction"
+                    title="暂停"
+                    @click="pauseCreateJob(job)"
+                  >
+                    <Pause :size="14" />
+                  </button>
+                  <button
+                    v-else-if="job.status === 'paused' || job.status === 'error'"
+                    class="mini-button icon-mini"
+                    type="button"
+                    :disabled="busy.jobAction"
+                    title="恢复"
+                    @click="resumeCreateJob(job)"
+                  >
+                    <Play :size="14" />
+                  </button>
+                  <button
+                    class="mini-button icon-mini danger-button"
+                    type="button"
+                    :disabled="busy.jobAction"
+                    title="删除"
+                    @click="deleteCreateJob(job)"
+                  >
+                    <Trash2 :size="14" />
+                  </button>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
 
         <div v-if="busy.aliases" class="empty-state">正在读取别名列表...</div>
         <div v-else-if="aliases.length === 0" class="empty-state">当前账号还没有隐私邮箱别名。</div>

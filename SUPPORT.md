@@ -15,4 +15,4 @@ Please include:
 - whether you use `icloud.com` or `icloud.com.cn`
 - sanitized error output
 
-Do not include Cookie values, App-specific passwords, or `data/accounts.json`.
+Do not include Cookie values, App-specific passwords, `data/accounts.json`, or `data/create_jobs.json`.

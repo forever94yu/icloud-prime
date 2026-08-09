@@ -27,6 +27,7 @@ Never commit real account data.
 The following files and directories must stay local:
 
 - `data/accounts.json`
+- `data/create_jobs.json`
 - `.env`
 - `logs/`
 - `build/`
@@ -37,12 +38,15 @@ The Windows portable release does not include real account data. It includes onl
 
 Your local `data/accounts.json` may contain iCloud Cookie values, App-specific passwords,
 and proxy settings. Treat it like a password file.
+Your local `data/create_jobs.json` contains scheduled alias creation jobs and stays local too.
 
 ## Features
 
 - Local web console at `http://127.0.0.1:8081`
 - Multi-account management
 - Create iCloud Hide My Email aliases
+- Batch-create up to 5 aliases per account per hour
+- Schedule automatic alias creation by duration or daily time window
 - List aliases for each account
 - Deactivate, reactivate, and delete aliases
 - Read mail through IMAP first, with Web API Cookie fallback
@@ -63,7 +67,7 @@ Open the Releases page:
 Download:
 
 ```text
-icloud-prime-windows10-portable-v0.1.0.zip
+icloud-prime-windows10-portable-v0.1.1.zip
 ```
 
 ### 2. Extract
@@ -77,14 +81,14 @@ D:\Tools\icloud-prime
 The extracted folder contains:
 
 ```text
-icloud-prime-windows10-portable-v0.1.0/
-??? icloud-prime.exe
-??? start.bat
-??? stop.bat
-??? README-Usage.txt
-??? data/
-?   ??? accounts.example.json
-??? logs/
+icloud-prime-windows10-portable-v0.1.1/
+|-- icloud-prime.exe
+|-- start.bat
+|-- stop.bat
+|-- README-Usage.txt
+|-- data/
+|   `-- accounts.example.json
+`-- logs/
 ```
 
 ### 3. Start
@@ -191,7 +195,71 @@ curl -X POST http://127.0.0.1:8081/api/create \
   -d "{\"account_id\":\"acc_1\",\"label\":\"Example site\"}"
 ```
 
-### 8. Read Mail
+### 8. Batch Create Aliases
+
+Batch creation shares the same hourly quota as single creation and automatic jobs.
+Each account can successfully create up to 5 aliases per hour.
+
+In the web console:
+
+1. Select an account.
+2. Open the batch creation area.
+3. Choose a count from `1` to `5`.
+4. Enter a label prefix such as `Signup`.
+5. Start the batch creation.
+6. Review the created aliases, skipped count, and remaining hourly quota.
+
+API example:
+
+```bash
+curl -X POST http://127.0.0.1:8081/api/create/batch \
+  -H "Content-Type: application/json" \
+  -d "{\"account_id\":\"acc_1\",\"count\":5,\"label_prefix\":\"Signup\"}"
+```
+
+### 9. Schedule Automatic Alias Creation
+
+Automatic jobs are stored locally in:
+
+```text
+data/create_jobs.json
+```
+
+Do not upload or share that file.
+
+Duration-based job:
+
+1. Select an account.
+2. Open the automatic creation area.
+3. Choose `duration`.
+4. Enter a duration in hours, for example `12`.
+5. Enter a label prefix.
+6. Save the job.
+7. Use pause, resume, or delete when needed.
+
+Daily-window job:
+
+1. Select an account.
+2. Choose `daily_window`.
+3. Enter `start_time` and `end_time` in `HH:mm` format.
+4. Use a cross-midnight range when needed, for example `22:00` to `02:00`.
+5. Save the job.
+
+API examples:
+
+```bash
+curl -X POST http://127.0.0.1:8081/api/create/jobs \
+  -H "Content-Type: application/json" \
+  -d "{\"account_id\":\"acc_1\",\"mode\":\"duration\",\"duration_hours\":12,\"label_prefix\":\"Auto\"}"
+
+curl -X POST http://127.0.0.1:8081/api/create/jobs \
+  -H "Content-Type: application/json" \
+  -d "{\"account_id\":\"acc_1\",\"mode\":\"daily_window\",\"start_time\":\"09:00\",\"end_time\":\"18:00\",\"label_prefix\":\"Workday\"}"
+
+curl "http://127.0.0.1:8081/api/create/jobs?account_id=acc_1"
+```
+
+### 10. Read Mail
 
 In the web console, select an account and alias.
 
@@ -206,7 +274,7 @@ Read order:
 1. IMAP through App-specific password.
 2. Web API through Cookie fallback.
 
-### 9. Stop
+### 11. Stop
 
 Double-click:
 
@@ -319,6 +387,12 @@ Alias management:
 
 ```text
 POST   /api/create
+POST   /api/create/batch
+GET    /api/create/jobs?account_id=acc_1
+POST   /api/create/jobs
+POST   /api/create/jobs/:id/pause
+POST   /api/create/jobs/:id/resume
+DELETE /api/create/jobs/:id
 GET    /api/aliases?account_id=acc_1
 POST   /api/aliases/:id/deactivate
 POST   /api/aliases/:id/reactivate

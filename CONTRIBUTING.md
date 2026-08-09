@@ -20,7 +20,7 @@ iCloud account data locally.
 1. Search existing issues and pull requests.
 2. Open an issue for larger changes before writing code.
 3. Keep the scope small.
-4. Never include real Cookie values, App-specific passwords, or account data.
+4. Never include real Cookie values, App-specific passwords, account data, or local job data.
 
 ## Local Development
 
@@ -63,7 +63,7 @@ Do not paste real secrets into issues, pull requests, screenshots, logs, or test
 fixtures. Use placeholders such as `PASTE_YOUR_COOKIE_VALUE_HERE`.
 
 Do not add logging that prints Cookie values, App-specific passwords, proxy
-credentials, or full account files.
+credentials, full account files, or `data/create_jobs.json`.
 
 ## Review Process
 

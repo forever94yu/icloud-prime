@@ -43,7 +43,7 @@ func main() {
 	count := len(mgr.ListAccounts())
 	log.Printf("账号加载完成 count=%d data_dir=%s", count, abs)
 
-	srv := server.New(mgr, *debug)
+	srv := server.New(mgr, *debug, abs)
 
 	log.Printf("HTTP 服务就绪 addr=%s", *addr)
 	if err := srv.Run(*addr); err != nil {

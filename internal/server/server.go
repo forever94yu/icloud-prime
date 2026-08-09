@@ -9,28 +9,51 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"icloud-hme/internal/account"
+	"icloud-hme/internal/createjob"
 	"icloud-hme/internal/hme"
 	"icloud-hme/internal/mail"
 )
 
 // Server 封装 Gin 引擎和账号管理器。
 type Server struct {
-	mgr *account.Manager
-	r   *gin.Engine
+	mgr       *account.Manager
+	scheduler *createjob.Scheduler
+	r         *gin.Engine
 }
 
 // New 创建 Server。debug 为 true 时启用 Gin 调试日志。
-func New(mgr *account.Manager, debug bool) *Server {
+func New(mgr *account.Manager, debug bool, dataDir ...string) *Server {
+	dir := "."
+	if len(dataDir) > 0 && dataDir[0] != "" {
+		dir = dataDir[0]
+	}
+	scheduler, err := createjob.NewScheduler(createjob.Config{
+		StorePath: filepath.Join(dir, "create_jobs.json"),
+		Creator:   hmeAliasCreator{mgr: mgr},
+	})
+	if err != nil {
+		panic(err)
+	}
+	srv := NewWithScheduler(mgr, scheduler, debug)
+	scheduler.Start(context.Background(), time.Minute)
+	return srv
+}
+
+func NewWithScheduler(mgr *account.Manager, scheduler *createjob.Scheduler, debug bool) *Server {
 	if !debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	s := &Server{mgr: mgr}
+	s := &Server{mgr: mgr, scheduler: scheduler}
 	s.r = gin.Default() // 自带 Logger + Recovery 中间件
 	s.register()
 	s.registerStatic()
@@ -58,6 +81,12 @@ func (s *Server) register() {
 
 		// ===== 核心接口 1: 创建邮箱 =====
 		api.POST("/create", s.createAlias)
+		api.POST("/create/batch", s.createAliasBatch)
+		api.GET("/create/jobs", s.listCreateJobs)
+		api.POST("/create/jobs", s.upsertCreateJob)
+		api.POST("/create/jobs/:id/pause", s.pauseCreateJob)
+		api.POST("/create/jobs/:id/resume", s.resumeCreateJob)
+		api.DELETE("/create/jobs/:id", s.deleteCreateJob)
 
 		// ===== 核心接口 2: 读取邮件 =====
 		api.GET("/inbox", s.listInbox)
@@ -90,6 +119,29 @@ func fail(c *gin.Context, code int, msg string) {
 	c.JSON(code, apiResp{Success: false, Message: msg})
 }
 
+type hmeAliasCreator struct {
+	mgr *account.Manager
+}
+
+func (h hmeAliasCreator) CreateAlias(ctx context.Context, accountID, label string) (*createjob.CreateResult, error) {
+	_ = ctx
+	client, err := h.mgr.HMEClient(accountID, false)
+	if err != nil {
+		return nil, err
+	}
+	result, err := client.CreateAlias(label, 5)
+	_ = h.mgr.SaveCookies(accountID, client.Cookies)
+	if err != nil {
+		return nil, err
+	}
+	return &createjob.CreateResult{
+		Email:     result.Email,
+		Label:     result.Label,
+		CreatedAt: result.CreatedAt,
+		AccountID: accountID,
+	}, nil
+}
+
 // ====================================================================
 // 核心接口 1: 创建邮箱
 //   POST /api/create
@@ -109,21 +161,13 @@ func (s *Server) createAlias(c *gin.Context) {
 		return
 	}
 
-	client, err := s.mgr.HMEClient(req.AccountID, false)
-	if err != nil {
-		fail(c, http.StatusNotFound, err.Error())
-		return
-	}
-
-	result, err := client.CreateAlias(req.Label, 5)
-
-	// 操作完成后,保存可能已刷新的 Cookie（validate 会轮换 token）
-	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
-
+	result, err := s.scheduler.CreateOne(c.Request.Context(), req.AccountID, req.Label)
 	if err != nil {
 		// 区分会话失效(需重新登录)与临时失败
 		msg := err.Error()
-		if isSessionError(msg) {
+		if errors.Is(err, createjob.ErrHourlyQuotaExceeded) {
+			fail(c, http.StatusTooManyRequests, msg)
+		} else if isSessionError(msg) {
 			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
 		} else {
 			fail(c, http.StatusBadGateway, "创建邮箱失败: "+msg)
@@ -137,6 +181,79 @@ func (s *Server) createAlias(c *gin.Context) {
 		"created_at": result.CreatedAt,
 		"account_id": req.AccountID,
 	})
+}
+
+func (s *Server) createAliasBatch(c *gin.Context) {
+	var req createjob.BatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "参数错误: account_id, count 必填 — "+err.Error())
+		return
+	}
+	resp, err := s.scheduler.BatchCreate(c.Request.Context(), req)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "count") || strings.Contains(msg, "account_id") {
+			fail(c, http.StatusBadRequest, msg)
+		} else if isSessionError(msg) {
+			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+msg)
+		} else {
+			fail(c, http.StatusBadGateway, "批量创建失败: "+msg)
+		}
+		return
+	}
+	ok(c, resp)
+}
+
+func (s *Server) listCreateJobs(c *gin.Context) {
+	accountID := strings.TrimSpace(c.Query("account_id"))
+	data := gin.H{
+		"jobs": s.scheduler.ListJobs(accountID),
+	}
+	if accountID != "" {
+		data["remaining_this_hour"] = s.scheduler.RemainingThisHour(accountID)
+	}
+	ok(c, data)
+}
+
+func (s *Server) upsertCreateJob(c *gin.Context) {
+	var req createjob.JobRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	job, err := s.scheduler.UpsertJob(req)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	ok(c, job)
+}
+
+func (s *Server) pauseCreateJob(c *gin.Context) {
+	job, err := s.scheduler.PauseJob(c.Param("id"))
+	if err != nil {
+		fail(c, http.StatusNotFound, err.Error())
+		return
+	}
+	ok(c, job)
+}
+
+func (s *Server) resumeCreateJob(c *gin.Context) {
+	job, err := s.scheduler.ResumeJob(c.Param("id"))
+	if err != nil {
+		fail(c, http.StatusNotFound, err.Error())
+		return
+	}
+	ok(c, job)
+}
+
+func (s *Server) deleteCreateJob(c *gin.Context) {
+	id := c.Param("id")
+	if err := s.scheduler.DeleteJob(id); err != nil {
+		fail(c, http.StatusNotFound, err.Error())
+		return
+	}
+	ok(c, gin.H{"id": id})
 }
 
 // ====================================================================

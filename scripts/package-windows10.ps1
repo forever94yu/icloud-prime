@@ -74,15 +74,17 @@ How to use:
 3. Open http://127.0.0.1:8081 in your browser.
 4. Add your own iCloud account in the web console.
 5. Configure your own Cookie or App-specific password.
-6. Create Hide My Email aliases or read mail.
-7. Double-click stop.bat when you want to stop the service.
+6. Create one Hide My Email alias, batch-create aliases, or schedule automatic alias creation.
+7. Read mail sent to an alias when needed.
+8. Double-click stop.bat when you want to stop the service.
 
 Security notes:
 1. This package does not include any real account data.
 2. The first run may create data\accounts.json on your computer.
 3. data\accounts.json can contain Cookie values, App-specific passwords, and proxy settings.
-4. Do not share or upload data\accounts.json.
-5. logs\ only stores local runtime logs.
+4. Automatic creation jobs are stored locally in data\create_jobs.json.
+5. Do not share or upload data\accounts.json or data\create_jobs.json.
+6. logs\ only stores local runtime logs.
 
 Example config:
 data\accounts.example.json only shows the field format. Replace placeholders with your own values.
@@ -111,7 +113,7 @@ Set-Content -LiteralPath (Join-Path $stageDir "data\accounts.example.json") -Enc
 $releaseNotes = @(
   "# iCloud Prime v$Version",
   "",
-  "Initial public release.",
+  "Windows 10 portable release.",
   "",
   "## Windows 10 portable package",
   "",
@@ -125,14 +127,16 @@ $releaseNotes = @(
   "2. Double-click start.bat.",
   "3. Open http://127.0.0.1:8081.",
   "4. Add your own account and configure Cookie or App-specific password.",
-  "5. Use stop.bat to stop the service.",
+  "5. Create aliases, batch-create aliases, schedule automatic jobs, or read mail.",
+  "6. Use stop.bat to stop the service.",
   "",
   "## Security",
   "",
   "- The release package contains no real account data.",
   "- The package only includes accounts.example.json with placeholders.",
   "- Real account data is saved locally to data\accounts.json after you run the app.",
-  "- Do not share data\accounts.json, Cookie values, or App-specific passwords."
+  "- Automatic job data is saved locally to data\create_jobs.json after you create jobs.",
+  "- Do not share data\accounts.json, data\create_jobs.json, Cookie values, or App-specific passwords."
 )
 Set-Content -LiteralPath (Join-Path $outputRootFullPath "v$Version-notes.md") -Encoding ASCII -Value $releaseNotes
 

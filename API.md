@@ -154,6 +154,147 @@ Response:
 }
 ```
 
+Single creation, batch creation, and automatic jobs share the same quota:
+up to 5 successful alias creations per account per hour.
+When the quota is exhausted, single creation returns `429 Too Many Requests`.
+
+### Batch Create Aliases
+
+```http
+POST /api/create/batch
+Content-Type: application/json
+```
+
+Body:
+
+```json
+{
+  "account_id": "acc_1",
+  "count": 5,
+  "label_prefix": "Signup"
+}
+```
+
+Fields:
+
+- `account_id`: required account ID.
+- `count`: required number from `1` to `5`.
+- `label_prefix`: optional prefix used to generate labels such as `Signup 1`.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "account_id": "acc_1",
+    "requested": 5,
+    "created": [
+      {
+        "email": "alias@icloud.com",
+        "label": "Signup 1",
+        "created_at": "2026-08-09T10:12:00+08:00",
+        "account_id": "acc_1"
+      }
+    ],
+    "created_count": 1,
+    "skipped_count": 4,
+    "remaining_this_hour": 0,
+    "message": "quota was not enough for the full request"
+  }
+}
+```
+
+If the remaining hourly quota is lower than `count`, the API creates what it can
+and reports the skipped count.
+
+### List Automatic Create Jobs
+
+```http
+GET /api/create/jobs?account_id=acc_1
+```
+
+`account_id` is optional. When it is present, the response includes
+`remaining_this_hour`.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "remaining_this_hour": 5,
+    "jobs": [
+      {
+        "id": "job_abcd1234",
+        "account_id": "acc_1",
+        "label_prefix": "Auto",
+        "mode": "duration",
+        "status": "running",
+        "duration_hours": 12,
+        "created_count": 3,
+        "next_run_at": "2026-08-09T10:20:00+08:00",
+        "created_at": "2026-08-09T09:00:00+08:00",
+        "updated_at": "2026-08-09T10:00:00+08:00"
+      }
+    ]
+  }
+}
+```
+
+### Create or Update an Automatic Create Job
+
+```http
+POST /api/create/jobs
+Content-Type: application/json
+```
+
+Duration mode:
+
+```json
+{
+  "account_id": "acc_1",
+  "label_prefix": "Auto",
+  "mode": "duration",
+  "duration_hours": 12
+}
+```
+
+Daily window mode:
+
+```json
+{
+  "account_id": "acc_1",
+  "label_prefix": "Workday",
+  "mode": "daily_window",
+  "start_time": "09:00",
+  "end_time": "18:00"
+}
+```
+
+Fields:
+
+- `id`: optional job ID. Omit it to create a new job; provide it to update a job.
+- `account_id`: required account ID.
+- `label_prefix`: optional label prefix.
+- `mode`: required, either `duration` or `daily_window`.
+- `duration_hours`: required when `mode` is `duration`.
+- `start_time` and `end_time`: required when `mode` is `daily_window`, in `HH:mm` format.
+
+Daily windows can cross midnight, for example `22:00` to `02:00`.
+Jobs are stored locally in `data/create_jobs.json` and resume after restart when
+their status is `running`.
+
+### Manage Automatic Create Jobs
+
+```http
+POST /api/create/jobs/:id/pause
+POST /api/create/jobs/:id/resume
+DELETE /api/create/jobs/:id
+```
+
+Pause and resume return the updated job. Delete returns the removed job ID.
+
 ### List Aliases
 
 ```http

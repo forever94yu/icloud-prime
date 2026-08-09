@@ -18,6 +18,7 @@ minimum information needed to reproduce the issue.
 Never include real values for:
 
 - `data/accounts.json`
+- `data/create_jobs.json`
 - iCloud Cookie headers
 - `X-APPLE-*` Cookie values
 - App-specific passwords
