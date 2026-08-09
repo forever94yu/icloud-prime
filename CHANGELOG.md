@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.2 - 2026-08-10 00:46 +08:00
+
+- Refreshed the web console visual design across account, creation, alias list, inbox, verification code, and settings views.
+- Added public demo screenshots to the README.
+- Sanitized README screenshots so real account data, aliases, verification codes, and message previews are not exposed.
+- Updated the embedded web assets for the redesigned frontend.
+- Updated the release workflow to publish only the Windows 10 portable package.
+
 ## v0.1.1 - 2026-08-09 16:28 +08:00
 
 - Added batch Hide My Email alias creation with per-account hourly quota reporting.

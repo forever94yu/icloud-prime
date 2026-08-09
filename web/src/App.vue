@@ -2,19 +2,22 @@
 import { computed, onMounted, ref } from "vue";
 import {
   AlertCircle,
+  CalendarClock,
   CheckCircle2,
   Copy,
-  CalendarClock,
   Folder,
   Inbox,
+  KeyRound,
   Loader2,
   Mail,
   Pause,
-  Plus,
   Play,
+  Plus,
   RefreshCw,
+  Settings2,
   ShieldCheck,
   Trash2,
+  UserRound,
 } from "lucide-vue-next";
 
 type ApiResponse<T> = {
@@ -120,11 +123,31 @@ type CreateJobsData = {
   remaining_this_hour?: number;
 };
 
+type AppTab = "account" | "create" | "aliases" | "inbox" | "codes" | "settings";
+
 const defaultFolders: FolderOption[] = [
   { name: "all", role: "all" },
   { name: "INBOX", role: "inbox" },
   { name: "Junk", role: "junk" },
 ];
+
+const navItems: { id: AppTab; label: string }[] = [
+  { id: "account", label: "账户" },
+  { id: "create", label: "生成邮箱" },
+  { id: "aliases", label: "邮箱列表" },
+  { id: "inbox", label: "收件箱" },
+  { id: "codes", label: "验证码" },
+  { id: "settings", label: "设置" },
+];
+
+const pageTitles: Record<AppTab, string> = {
+  account: "账户",
+  create: "生成邮箱",
+  aliases: "邮箱列表",
+  inbox: "收件箱邮件",
+  codes: "验证码",
+  settings: "设置",
+};
 
 const accounts = ref<Account[]>([]);
 const aliases = ref<Alias[]>([]);
@@ -133,8 +156,12 @@ const messages = ref<Message[]>([]);
 const selectedAccountId = ref("");
 const selectedAlias = ref("");
 const selectedFolder = ref("all");
+const selectedMessageId = ref("");
 const newLabel = ref("");
 const batchCount = ref(5);
+const mailLimit = ref(10);
+const onlyUnread = ref(false);
+const onlyHideMyEmail = ref(false);
 const createJobs = ref<CreateJob[]>([]);
 const remainingThisHour = ref(5);
 const jobMode = ref<"duration" | "daily_window">("duration");
@@ -142,6 +169,7 @@ const durationHours = ref(12);
 const dailyStart = ref("09:00");
 const dailyEnd = ref("18:00");
 const jobLabelPrefix = ref("自动创建");
+const activeTab = ref<AppTab>("inbox");
 const notice = ref("");
 const error = ref("");
 const busy = ref({
@@ -174,6 +202,54 @@ const folderOptions = computed(() => {
   }
   return Array.from(byName.values());
 });
+const accountDisplayEmail = computed(
+  () => activeAccount.value?.icloud_email || activeAccount.value?.real_email || "未设置邮箱",
+);
+const cookieStatusLabel = computed(() => (selectedAccountId.value ? "已配置" : "未配置"));
+const inboxStatusLabel = computed(() => (selectedAccountId.value ? "已配置" : "未配置"));
+const pageTitle = computed(() => pageTitles[activeTab.value]);
+const pageSubtitle = computed(() => {
+  if (activeTab.value === "inbox" && selectedAliasInfo.value) {
+    return `Hide My Email · ${selectedAliasInfo.value.email}`;
+  }
+  if (activeTab.value === "inbox") {
+    return `Hide My Email · ${accountDisplayEmail.value}`;
+  }
+  if (activeTab.value === "create") {
+    return `本小时共享额度 ${remainingThisHour.value} / 5`;
+  }
+  if (activeTab.value === "aliases") {
+    return `${aliases.value.length} 个别名 · ${activeAliases.value} 个启用`;
+  }
+  if (activeTab.value === "codes") {
+    return `${extractedCodes.value.length} 个可能验证码`;
+  }
+  return accountDisplayEmail.value;
+});
+const visibleMessages = computed(() => {
+  let list = messages.value;
+  if (onlyHideMyEmail.value) {
+    list = list.filter(isHideMyEmailMessage);
+  }
+  if (onlyUnread.value) {
+    list = list.filter(isUnreadMessage);
+  }
+  const limit = Math.min(100, Math.max(1, Number(mailLimit.value) || 10));
+  return list.slice(0, limit);
+});
+const activeMessage = computed(() => {
+  if (visibleMessages.value.length === 0) return undefined;
+  return (
+    visibleMessages.value.find((message) => message.id === selectedMessageId.value) ||
+    visibleMessages.value[0]
+  );
+});
+const activeCode = computed(() => extractVerificationCode(activeMessage.value));
+const extractedCodes = computed(() =>
+  visibleMessages.value
+    .map((message) => ({ message, code: extractVerificationCode(message) }))
+    .filter((item) => item.code),
+);
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -273,6 +349,7 @@ async function createAlias() {
     await loadAliases();
     await loadCreateJobs();
     await loadInbox(created.email);
+    activeTab.value = "inbox";
   } catch (err) {
     setError(err);
   } finally {
@@ -305,7 +382,10 @@ async function createAliasBatch() {
       `已创建 ${data.created_count} 个别名${data.skipped_count ? `，跳过 ${data.skipped_count} 个` : ""}`;
     await loadAliases();
     await loadCreateJobs();
-    if (lastCreated) await loadInbox(lastCreated.email);
+    if (lastCreated) {
+      await loadInbox(lastCreated.email);
+      activeTab.value = "inbox";
+    }
   } catch (err) {
     setError(err);
   } finally {
@@ -389,7 +469,7 @@ async function loadInbox(alias = selectedAlias.value) {
   try {
     const params = new URLSearchParams({
       account_id: selectedAccountId.value,
-      limit: "50",
+      limit: String(Math.min(100, Math.max(1, Number(mailLimit.value) || 10))),
       days: "30",
       folder: selectedFolder.value,
     });
@@ -401,6 +481,9 @@ async function loadInbox(alias = selectedAlias.value) {
       count: data.count,
       folder: data.folder || selectedFolder.value,
     };
+    if (!messages.value.some((message) => message.id === selectedMessageId.value)) {
+      selectedMessageId.value = messages.value[0]?.id ?? "";
+    }
   } catch (err) {
     setError(err);
   } finally {
@@ -418,6 +501,7 @@ async function refreshAll() {
 
 async function handleAccountChange() {
   selectedAlias.value = "";
+  selectedMessageId.value = "";
   await loadMailboxes();
   await loadAliases();
   await loadCreateJobs();
@@ -427,7 +511,12 @@ async function handleAccountChange() {
 async function chooseAlias(alias: Alias) {
   selectedAlias.value = alias.email;
   selectedFolder.value = "all";
+  activeTab.value = "inbox";
   await loadInbox(alias.email);
+}
+
+function selectMessage(message: Message) {
+  selectedMessageId.value = message.id;
 }
 
 async function copyText(text: string) {
@@ -437,6 +526,8 @@ async function copyText(text: string) {
 
 function clearAliasSelection() {
   selectedAlias.value = "";
+  selectedMessageId.value = "";
+  activeTab.value = "inbox";
   void loadInbox();
 }
 
@@ -446,6 +537,19 @@ function formatDate(value?: string) {
   const date = Number.isFinite(asNumber) && value.length > 10 ? new Date(asNumber) : new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
+}
+
+function formatMessageTime(value?: string) {
+  if (!value) return "未知";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return formatDate(value);
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
 }
 
 function folderLabel(optionOrName?: FolderOption | string) {
@@ -472,6 +576,35 @@ function jobStatusLabel(status: CreateJob["status"]) {
   return status;
 }
 
+function senderName(message?: Message) {
+  if (!message?.from) return "未知发件人";
+  const quoted = message.from.match(/"([^"]+)"/);
+  if (quoted?.[1]) return quoted[1];
+  return message.from.split("<")[0].trim() || message.from;
+}
+
+function isHideMyEmailMessage(message: Message) {
+  const text = `${message.to || ""} ${message.from || ""}`.toLowerCase();
+  return text.includes("@icloud.com") || Boolean(selectedAlias.value && text.includes(selectedAlias.value.toLowerCase()));
+}
+
+function isUnreadMessage(message: Message) {
+  const extra = message as Message & { unread?: boolean; read?: boolean; seen?: boolean };
+  if (typeof extra.unread === "boolean") return extra.unread;
+  if (typeof extra.read === "boolean") return !extra.read;
+  if (typeof extra.seen === "boolean") return !extra.seen;
+  return true;
+}
+
+function extractVerificationCode(message?: Message) {
+  if (!message) return "";
+  const text = [message.subject, message.preview].filter(Boolean).join("\n");
+  const sixDigit = text.match(/(?:^|\D)(\d{6})(?!\d)/);
+  if (sixDigit?.[1]) return sixDigit[1];
+  const shortCode = text.match(/(?:^|\D)(\d{4,8})(?!\d)/);
+  return shortCode?.[1] ?? "";
+}
+
 onMounted(async () => {
   await loadAccounts();
   await loadMailboxes();
@@ -483,109 +616,137 @@ onMounted(async () => {
 
 <template>
   <main class="app-shell">
-    <header class="topbar">
-      <div>
-        <p class="product-label">iCloud Hide My Email</p>
-        <h1>隐私邮箱管理台</h1>
-      </div>
-      <button class="icon-button" type="button" :disabled="busy.accounts" @click="refreshAll">
-        <RefreshCw :class="{ spin: busy.accounts || busy.aliases || busy.inbox }" :size="18" />
-        <span>刷新</span>
-      </button>
-    </header>
-
-    <section v-if="error || notice" class="feedback" :class="{ danger: error }">
-      <AlertCircle v-if="error" :size="18" />
-      <CheckCircle2 v-else :size="18" />
-      <span>{{ error || notice }}</span>
-    </section>
-
-    <section class="workspace">
-      <aside class="panel account-panel">
-        <div class="panel-title">
-          <ShieldCheck :size="20" />
-          <span>账号</span>
+    <div class="shell-inner">
+      <header class="masthead">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><span></span></span>
+          <h1>iCloud+ 隐藏邮箱</h1>
         </div>
-
-        <label class="field-label" for="account">当前账号</label>
-        <select id="account" v-model="selectedAccountId" class="select" @change="handleAccountChange">
-          <option v-for="account in accounts" :key="account.id" :value="account.id">
-            {{ account.name || account.id }}
-          </option>
-        </select>
-
-        <div v-if="activeAccount" class="account-card">
-          <div class="status-line">
-            <span class="status-dot" :class="{ active: activeAccount.status === 'active' }"></span>
-            <strong>{{ activeAccount.status || "unknown" }}</strong>
-          </div>
-          <p>{{ activeAccount.icloud_email || activeAccount.real_email || "未设置邮箱" }}</p>
-          <p>{{ activeAccount.host }}</p>
-        </div>
-
-        <div class="stats-grid">
-          <div>
-            <strong>{{ aliases.length }}</strong>
-            <span>全部别名</span>
-          </div>
-          <div>
-            <strong>{{ activeAliases }}</strong>
-            <span>启用中</span>
-          </div>
-          <div>
-            <strong>{{ inactiveAliases }}</strong>
-            <span>已停用</span>
-          </div>
-        </div>
-      </aside>
-
-      <section class="panel alias-panel">
-        <div class="panel-heading">
-          <div class="panel-title">
-            <Mail :size="20" />
-            <span>隐私邮箱</span>
-          </div>
-          <button class="ghost-button" type="button" :disabled="busy.aliases" @click="loadAliases">
-            <RefreshCw :class="{ spin: busy.aliases }" :size="16" />
-            更新列表
+        <div class="status-cluster">
+          <span class="status-pill" :class="{ ok: cookieStatusLabel === '已配置' }">
+            <span class="pill-dot"></span>
+            Cookie: {{ cookieStatusLabel }}
+          </span>
+          <span class="status-pill" :class="{ ok: inboxStatusLabel === '已配置' }">
+            <span class="pill-dot"></span>
+            收件箱: {{ inboxStatusLabel }}
+          </span>
+          <span class="status-pill muted">已生成: {{ aliases.length }}</span>
+          <button class="icon-button" type="button" :disabled="busy.accounts" aria-label="刷新" title="刷新" @click="refreshAll">
+            <RefreshCw :class="{ spin: busy.accounts || busy.aliases || busy.inbox }" :size="17" />
           </button>
         </div>
+      </header>
 
-        <form class="create-row" @submit.prevent="createAlias">
-          <input
-            v-model="newLabel"
-            class="input"
-            placeholder="新别名标签，例如 GitHub 注册"
-            aria-label="新别名标签"
-          />
-          <button class="primary-button" type="submit" :disabled="busy.create || !selectedAccountId">
-            <Loader2 v-if="busy.create" class="spin" :size="17" />
-            <Plus v-else :size="17" />
-            创建别名
-          </button>
-        </form>
+      <nav class="tabbar" aria-label="主导航" role="tablist">
+        <button
+          v-for="item in navItems"
+          :key="item.id"
+          class="app-tab"
+          :class="{ active: activeTab === item.id, quiet: item.id === 'aliases' && activeTab !== item.id }"
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === item.id"
+          @click="activeTab = item.id"
+        >
+          {{ item.label }}
+        </button>
+      </nav>
 
-        <div class="batch-row">
-          <label class="compact-field">
-            <span>数量</span>
-            <input v-model.number="batchCount" class="input compact-input" type="number" min="1" max="5" />
-          </label>
-          <button class="ghost-button" type="button" :disabled="busy.batch || !selectedAccountId" @click="createAliasBatch">
-            <Loader2 v-if="busy.batch" class="spin" :size="16" />
-            <Plus v-else :size="16" />
-            批量创建
-          </button>
-          <span class="quota-pill">本小时剩余 {{ remainingThisHour }}</span>
+      <section v-if="error || notice" class="feedback" :class="{ danger: error }">
+        <AlertCircle v-if="error" :size="18" />
+        <CheckCircle2 v-else :size="18" />
+        <span>{{ error || notice }}</span>
+      </section>
+
+      <section class="page-head">
+        <div class="title-group">
+          <h2>{{ pageTitle }}</h2>
+          <p>{{ pageSubtitle }}</p>
         </div>
+        <span class="quota-pill">本小时可创建 <strong>{{ remainingThisHour }}</strong> / 5</span>
+      </section>
 
-        <section class="job-section">
-          <div class="panel-heading">
-            <div class="panel-title small-title">
-              <CalendarClock :size="18" />
+      <section v-if="activeTab === 'account'" class="account-view">
+        <article class="surface account-selector">
+          <div class="surface-title">
+            <UserRound :size="19" />
+            <span>当前账号</span>
+          </div>
+          <select id="account" v-model="selectedAccountId" class="select" @change="handleAccountChange">
+            <option v-for="account in accounts" :key="account.id" :value="account.id">
+              {{ account.name || account.id }}
+            </option>
+          </select>
+          <div v-if="activeAccount" class="account-details">
+            <span class="status-line">
+              <span class="status-dot" :class="{ active: activeAccount.status === 'active' }"></span>
+              {{ activeAccount.status || "unknown" }}
+            </span>
+            <strong>{{ accountDisplayEmail }}</strong>
+            <small>{{ activeAccount.host || "iCloud" }}</small>
+          </div>
+        </article>
+
+        <article class="stat-tile">
+          <strong>{{ aliases.length }}</strong>
+          <span>全部别名</span>
+        </article>
+        <article class="stat-tile">
+          <strong>{{ activeAliases }}</strong>
+          <span>启用中</span>
+        </article>
+        <article class="stat-tile">
+          <strong>{{ inactiveAliases }}</strong>
+          <span>已停用</span>
+        </article>
+      </section>
+
+      <section v-if="activeTab === 'create'" class="create-view">
+        <article class="surface create-surface">
+          <div class="surface-heading">
+            <div class="surface-title">
+              <Mail :size="19" />
+              <span>生成邮箱</span>
+            </div>
+            <span class="soft-tag">共享额度 {{ remainingThisHour }} / 5</span>
+          </div>
+
+          <form class="create-row" @submit.prevent="createAlias">
+            <input
+              v-model="newLabel"
+              class="input"
+              placeholder="新别名标签，例如 GitHub 注册"
+              aria-label="新别名标签"
+            />
+            <button class="primary-button" type="submit" :disabled="busy.create || !selectedAccountId">
+              <Loader2 v-if="busy.create" class="spin" :size="17" />
+              <Plus v-else :size="17" />
+              创建别名
+            </button>
+          </form>
+
+          <div class="batch-row">
+            <label class="compact-field">
+              <span>数量</span>
+              <input v-model.number="batchCount" class="input compact-input" type="number" min="1" max="5" />
+            </label>
+            <button class="secondary-button" type="button" :disabled="busy.batch || !selectedAccountId" @click="createAliasBatch">
+              <Loader2 v-if="busy.batch" class="spin" :size="16" />
+              <Plus v-else :size="16" />
+              批量创建
+            </button>
+          </div>
+        </article>
+
+        <article class="surface schedule-surface">
+          <div class="surface-heading">
+            <div class="surface-title">
+              <CalendarClock :size="19" />
               <span>自动创建</span>
             </div>
-            <button class="ghost-button" type="button" :disabled="busy.jobs" @click="loadCreateJobs">
-              <RefreshCw :class="{ spin: busy.jobs }" :size="16" />
+            <button class="secondary-button small-button" type="button" :disabled="busy.jobs" @click="loadCreateJobs">
+              <RefreshCw :class="{ spin: busy.jobs }" :size="15" />
               更新任务
             </button>
           </div>
@@ -644,12 +805,12 @@ onMounted(async () => {
                 <small v-if="job.last_error" class="danger-text">{{ job.last_error }}</small>
               </div>
               <div class="job-meta">
-                <span class="tag" :class="{ muted: job.status !== 'running' }">{{ jobStatusLabel(job.status) }}</span>
+                <span class="soft-tag" :class="{ muted: job.status !== 'running' }">{{ jobStatusLabel(job.status) }}</span>
                 <small>{{ job.created_count }} 个</small>
                 <div class="job-actions">
                   <button
                     v-if="job.status === 'running'"
-                    class="mini-button icon-mini"
+                    class="mini-button"
                     type="button"
                     :disabled="busy.jobAction"
                     title="暂停"
@@ -659,7 +820,7 @@ onMounted(async () => {
                   </button>
                   <button
                     v-else-if="job.status === 'paused' || job.status === 'error'"
-                    class="mini-button icon-mini"
+                    class="mini-button"
                     type="button"
                     :disabled="busy.jobAction"
                     title="恢复"
@@ -668,7 +829,7 @@ onMounted(async () => {
                     <Play :size="14" />
                   </button>
                   <button
-                    class="mini-button icon-mini danger-button"
+                    class="mini-button danger-button"
                     type="button"
                     :disabled="busy.jobAction"
                     title="删除"
@@ -680,7 +841,17 @@ onMounted(async () => {
               </div>
             </article>
           </div>
-        </section>
+        </article>
+      </section>
+
+      <section v-if="activeTab === 'aliases'" class="alias-view">
+        <div class="view-toolbar">
+          <span class="toolbar-note">{{ aliases.length }} 个别名</span>
+          <button class="secondary-button" type="button" :disabled="busy.aliases" @click="loadAliases">
+            <RefreshCw :class="{ spin: busy.aliases }" :size="16" />
+            更新列表
+          </button>
+        </div>
 
         <div v-if="busy.aliases" class="empty-state">正在读取别名列表...</div>
         <div v-else-if="aliases.length === 0" class="empty-state">当前账号还没有隐私邮箱别名。</div>
@@ -698,7 +869,7 @@ onMounted(async () => {
               <small>{{ alias.label || "未命名" }}</small>
             </span>
             <span class="alias-meta">
-              <span class="tag" :class="{ muted: !alias.active }">
+              <span class="soft-tag" :class="{ muted: !alias.active }">
                 {{ alias.active ? "启用" : "停用" }}
               </span>
               <small>{{ formatDate(alias.createdAt) }}</small>
@@ -707,20 +878,115 @@ onMounted(async () => {
         </div>
       </section>
 
-      <section class="panel message-panel">
-        <div class="panel-heading">
-          <div class="panel-title">
-            <Inbox :size="20" />
-            <span>邮件</span>
-          </div>
-          <button class="ghost-button" type="button" :disabled="busy.inbox" @click="loadInbox()">
-            <RefreshCw :class="{ spin: busy.inbox }" :size="16" />
-            读取邮件
+      <section v-if="activeTab === 'inbox'" class="inbox-view">
+        <div class="mail-toolbar">
+          <label class="compact-field limit-field">
+            <span>数量</span>
+            <input v-model.number="mailLimit" class="input compact-input" type="number" min="1" max="100" />
+          </label>
+          <label class="check-field">
+            <input v-model="onlyUnread" type="checkbox" />
+            <span>只看未读</span>
+          </label>
+          <label class="check-field">
+            <input v-model="onlyHideMyEmail" type="checkbox" />
+            <span>只看隐藏邮箱</span>
+          </label>
+          <button class="primary-button fetch-button" type="button" :disabled="busy.inbox" @click="loadInbox()">
+            <Loader2 v-if="busy.inbox" class="spin" :size="17" />
+            <Inbox v-else :size="17" />
+            拉取邮件
           </button>
         </div>
 
-        <div class="mail-toolbar">
-          <label class="folder-select">
+        <div v-if="selectedAliasInfo" class="selected-alias">
+          <span>{{ selectedAliasInfo.email }}</span>
+          <button class="mini-text-button" type="button" @click="copyText(selectedAliasInfo.email)">
+            <Copy :size="14" />
+            复制
+          </button>
+          <button class="mini-text-button" type="button" @click="clearAliasSelection">查看全部邮件</button>
+        </div>
+
+        <div v-if="busy.inbox" class="empty-state">正在读取邮件...</div>
+        <div v-else-if="visibleMessages.length === 0" class="empty-state">
+          {{ selectedAlias ? "这个别名在当前文件夹范围内未读取到邮件。" : "当前范围暂无可显示邮件。" }}
+        </div>
+        <template v-else>
+          <section class="mail-list">
+            <button
+              v-for="message in visibleMessages"
+              :key="message.id"
+              class="mail-row"
+              :class="{ selected: activeMessage?.id === message.id }"
+              type="button"
+              @click="selectMessage(message)"
+            >
+              <span class="avatar">”</span>
+              <span class="mail-copy">
+                <span class="mail-title">
+                  <strong>{{ senderName(message) }}</strong>
+                  <span v-if="isHideMyEmailMessage(message)" class="soft-tag blue">隐藏邮箱</span>
+                  <span class="mail-subject">{{ message.subject || "无主题" }}</span>
+                </span>
+                <span class="preview">{{ message.preview || "无正文摘要" }}</span>
+              </span>
+              <time>{{ formatMessageTime(message.date) }}</time>
+            </button>
+          </section>
+
+          <section v-if="activeMessage" class="message-detail">
+            <dl class="message-meta">
+              <dt>主题:</dt>
+              <dd>{{ activeMessage.subject || "无主题" }}</dd>
+              <dt>发件人:</dt>
+              <dd>{{ activeMessage.from || "未知" }}</dd>
+              <dt>收件人:</dt>
+              <dd>{{ activeMessage.to || "未知" }}</dd>
+              <dt>时间:</dt>
+              <dd>{{ formatDate(activeMessage.date) }}</dd>
+            </dl>
+
+            <div v-if="activeCode" class="code-line">
+              <strong>可能验证码:</strong>
+              <span>{{ activeCode }}</span>
+            </div>
+
+            <div class="message-body">
+              <p>{{ activeMessage.preview || "无正文摘要" }}</p>
+            </div>
+          </section>
+        </template>
+      </section>
+
+      <section v-if="activeTab === 'codes'" class="code-view">
+        <div v-if="visibleMessages.length === 0" class="empty-state">当前没有可提取验证码的邮件。</div>
+        <div v-else-if="extractedCodes.length === 0" class="empty-state">当前邮件没有识别到验证码。</div>
+        <div v-else class="surface code-panel">
+          <div class="code-grid">
+            <article v-for="item in extractedCodes" :key="item.message.id" class="code-card">
+              <div class="code-card-head">
+                <span class="soft-tag blue">验证码</span>
+                <strong>{{ item.code }}</strong>
+              </div>
+              <p class="code-subject">{{ item.message.subject || "无主题" }}</p>
+              <small class="code-meta">{{ senderName(item.message) }} · {{ formatMessageTime(item.message.date) }}</small>
+              <button class="mini-text-button code-copy" type="button" @click="copyText(item.code)">
+                <Copy :size="14" />
+                复制
+              </button>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="activeTab === 'settings'" class="settings-view">
+        <article class="surface settings-panel">
+          <div class="surface-title">
+            <Settings2 :size="19" />
+            <span>服务状态</span>
+          </div>
+          <label class="settings-field">
             <Folder :size="16" />
             <select v-model="selectedFolder" class="select" :disabled="busy.folders" @change="loadInbox()">
               <option v-for="folder in folderOptions" :key="folder.name" :value="folder.name">
@@ -728,43 +994,56 @@ onMounted(async () => {
               </option>
             </select>
           </label>
-        </div>
-
-        <div class="mail-summary">
-          <div>
-            <strong>{{ inboxMeta.count }}</strong>
-            <span>封邮件</span>
+          <div class="settings-grid">
+            <div>
+              <span>Cookie</span>
+              <strong>{{ cookieStatusLabel }}</strong>
+            </div>
+            <div>
+              <span>收件箱</span>
+              <strong>{{ inboxStatusLabel }}</strong>
+            </div>
+            <div>
+              <span>邮件来源</span>
+              <strong>{{ inboxMeta.method || "未读取" }}</strong>
+            </div>
+            <div>
+              <span>自动任务</span>
+              <strong>{{ createJobs.length }}</strong>
+            </div>
           </div>
-          <div>
-            <strong>{{ inboxMeta.method || "未读取" }}</strong>
-            <span>{{ folderLabel(inboxMeta.folder) }}</span>
-          </div>
-        </div>
-
-        <div v-if="selectedAliasInfo" class="selected-alias">
-          <span>{{ selectedAliasInfo.email }}</span>
-          <button class="mini-button" type="button" @click="copyText(selectedAliasInfo.email)">
-            <Copy :size="14" />
-            复制
+          <button class="primary-button settings-refresh" type="button" :disabled="busy.accounts" @click="refreshAll">
+            <RefreshCw :class="{ spin: busy.accounts || busy.aliases || busy.inbox }" :size="17" />
+            刷新状态
           </button>
-          <button class="mini-button" type="button" @click="clearAliasSelection">查看全部邮件</button>
-        </div>
+        </article>
 
-        <div v-if="busy.inbox" class="empty-state">正在读取邮件...</div>
-        <div v-else-if="messages.length === 0" class="empty-state">
-          {{ selectedAlias ? "这个别名在当前文件夹范围内未读取到邮件。" : "当前范围暂无可显示邮件。" }}
-        </div>
-        <article v-for="message in messages" v-else :key="message.id" class="message-card">
-          <div class="message-top">
-            <strong>{{ message.subject || "无主题" }}</strong>
-            <time>{{ formatDate(message.date) }}</time>
+        <article class="surface settings-panel">
+          <div class="surface-title">
+            <ShieldCheck :size="19" />
+            <span>账号信息</span>
           </div>
-          <p class="message-from">{{ message.from }}</p>
-          <p v-if="message.to" class="message-to">收件人：{{ message.to }}</p>
-          <p v-if="message.folder" class="folder-badge">{{ folderLabel(message.folder) }}</p>
-          <p class="message-preview">{{ message.preview || "无正文摘要" }}</p>
+          <dl class="settings-list">
+            <dt>账号</dt>
+            <dd>{{ activeAccount?.name || selectedAccountId || "未选择" }}</dd>
+            <dt>邮箱</dt>
+            <dd>{{ accountDisplayEmail }}</dd>
+            <dt>主机</dt>
+            <dd>{{ activeAccount?.host || "iCloud" }}</dd>
+          </dl>
+        </article>
+
+        <article class="surface settings-panel">
+          <div class="surface-title">
+            <KeyRound :size="19" />
+            <span>额度</span>
+          </div>
+          <div class="quota-large">
+            <strong>{{ remainingThisHour }}</strong>
+            <span>本小时剩余</span>
+          </div>
         </article>
       </section>
-    </section>
+    </div>
   </main>
 </template>

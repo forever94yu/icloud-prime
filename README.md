@@ -54,6 +54,35 @@ Your local `data/create_jobs.json` contains scheduled alias creation jobs and st
 - Optional HTTP/SOCKS5 proxy settings
 - Windows 10 portable release package
 
+## Screenshots
+
+The screenshots below use public demo values only. Real account data, aliases,
+verification codes, and message previews are not included.
+
+### Account Overview
+
+![Account overview](docs/screenshots/accounts.png)
+
+### Alias Creation
+
+![Alias creation](docs/screenshots/create-alias.png)
+
+### Alias List
+
+![Alias list](docs/screenshots/alias-list.png)
+
+### Inbox
+
+![Inbox](docs/screenshots/inbox.png)
+
+### Verification Codes
+
+![Verification codes](docs/screenshots/verification-code.png)
+
+### Settings
+
+![Settings](docs/screenshots/settings.png)
+
 ## Quick Start: Windows 10 Portable Package
 
 This is the easiest way to run the project. You do not need Go or Node.js.
@@ -67,7 +96,7 @@ Open the Releases page:
 Download:
 
 ```text
-icloud-prime-windows10-portable-v0.1.1.zip
+icloud-prime-windows10-portable-v0.1.2.zip
 ```
 
 ### 2. Extract
@@ -81,7 +110,7 @@ D:\Tools\icloud-prime
 The extracted folder contains:
 
 ```text
-icloud-prime-windows10-portable-v0.1.1/
+icloud-prime-windows10-portable-v0.1.2/
 |-- icloud-prime.exe
 |-- start.bat
 |-- stop.bat
