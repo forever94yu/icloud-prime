@@ -904,6 +904,94 @@ h1 {
   white-space: pre-wrap;
 }
 
+.mail-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(20, 24, 32, 0.28);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+
+.mail-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(900px, 100%);
+  max-height: min(82vh, 760px);
+  overflow: hidden;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.96);
+  box-shadow:
+    0 34px 90px rgba(24, 31, 43, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.98);
+}
+
+.mail-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.mail-modal-title-group {
+  min-width: 0;
+}
+
+.mail-modal-title-group h3 {
+  margin: 10px 0 7px;
+  color: #121821;
+  font-size: 24px;
+  line-height: 1.25;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.mail-modal-title-group p {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.mail-modal-close {
+  flex: 0 0 auto;
+}
+
+.mail-modal-scroll {
+  min-height: 0;
+  overflow: auto;
+  padding: 22px 24px 26px;
+}
+
+.mail-modal-meta {
+  margin-bottom: 20px;
+}
+
+.mail-modal-code {
+  flex-wrap: wrap;
+}
+
+.mail-modal-body {
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+  color: #313946;
+  font-size: 17px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mail-modal-body p {
+  margin: 0;
+}
+
 .code-panel {
   padding: 20px;
   border-radius: 20px;
@@ -1184,5 +1272,27 @@ h1 {
   .message-meta dd,
   .settings-list dd {
     margin-bottom: 8px;
+  }
+
+  .mail-modal-backdrop {
+    padding: 10px;
+    place-items: end center;
+  }
+
+  .mail-modal {
+    max-height: calc(100vh - 20px);
+    border-radius: 22px;
+  }
+
+  .mail-modal-header {
+    padding: 18px 18px 14px;
+  }
+
+  .mail-modal-title-group h3 {
+    font-size: 20px;
+  }
+
+  .mail-modal-scroll {
+    padding: 18px;
   }
 }

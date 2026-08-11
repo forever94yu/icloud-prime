@@ -18,6 +18,7 @@ import {
   ShieldCheck,
   Trash2,
   UserRound,
+  X,
 } from "lucide-vue-next";
 
 type ApiResponse<T> = {
@@ -55,6 +56,7 @@ type Message = {
   subject: string;
   date: string;
   preview: string;
+  body?: string;
 };
 
 type FolderOption = {
@@ -162,6 +164,7 @@ const batchCount = ref(5);
 const mailLimit = ref(10);
 const onlyUnread = ref(false);
 const onlyHideMyEmail = ref(false);
+const mailModalOpen = ref(false);
 const createJobs = ref<CreateJob[]>([]);
 const remainingThisHour = ref(5);
 const jobMode = ref<"duration" | "daily_window">("duration");
@@ -244,7 +247,9 @@ const activeMessage = computed(() => {
     visibleMessages.value[0]
   );
 });
-const activeCode = computed(() => extractVerificationCode(activeMessage.value));
+const modalMessage = computed(() => (mailModalOpen.value ? activeMessage.value : undefined));
+const modalCode = computed(() => extractVerificationCode(modalMessage.value));
+const modalBody = computed(() => modalMessage.value?.body || modalMessage.value?.preview || "无正文摘要");
 const extractedCodes = computed(() =>
   visibleMessages.value
     .map((message) => ({ message, code: extractVerificationCode(message) }))
@@ -465,6 +470,7 @@ async function deleteCreateJob(job: CreateJob) {
 async function loadInbox(alias = selectedAlias.value) {
   if (!selectedAccountId.value) return;
   busy.value.inbox = true;
+  mailModalOpen.value = false;
   clearFeedback();
   try {
     const params = new URLSearchParams({
@@ -502,6 +508,7 @@ async function refreshAll() {
 async function handleAccountChange() {
   selectedAlias.value = "";
   selectedMessageId.value = "";
+  mailModalOpen.value = false;
   await loadMailboxes();
   await loadAliases();
   await loadCreateJobs();
@@ -517,6 +524,11 @@ async function chooseAlias(alias: Alias) {
 
 function selectMessage(message: Message) {
   selectedMessageId.value = message.id;
+  mailModalOpen.value = true;
+}
+
+function closeMailModal() {
+  mailModalOpen.value = false;
 }
 
 async function copyText(text: string) {
@@ -527,6 +539,7 @@ async function copyText(text: string) {
 function clearAliasSelection() {
   selectedAlias.value = "";
   selectedMessageId.value = "";
+  mailModalOpen.value = false;
   activeTab.value = "inbox";
   void loadInbox();
 }
@@ -912,51 +925,27 @@ onMounted(async () => {
         <div v-else-if="visibleMessages.length === 0" class="empty-state">
           {{ selectedAlias ? "这个别名在当前文件夹范围内未读取到邮件。" : "当前范围暂无可显示邮件。" }}
         </div>
-        <template v-else>
-          <section class="mail-list">
-            <button
-              v-for="message in visibleMessages"
-              :key="message.id"
-              class="mail-row"
-              :class="{ selected: activeMessage?.id === message.id }"
-              type="button"
-              @click="selectMessage(message)"
-            >
-              <span class="avatar">”</span>
-              <span class="mail-copy">
-                <span class="mail-title">
-                  <strong>{{ senderName(message) }}</strong>
-                  <span v-if="isHideMyEmailMessage(message)" class="soft-tag blue">隐藏邮箱</span>
-                  <span class="mail-subject">{{ message.subject || "无主题" }}</span>
-                </span>
-                <span class="preview">{{ message.preview || "无正文摘要" }}</span>
+        <section v-else class="mail-list">
+          <button
+            v-for="message in visibleMessages"
+            :key="message.id"
+            class="mail-row"
+            :class="{ selected: activeMessage?.id === message.id }"
+            type="button"
+            @click="selectMessage(message)"
+          >
+            <span class="avatar">”</span>
+            <span class="mail-copy">
+              <span class="mail-title">
+                <strong>{{ senderName(message) }}</strong>
+                <span v-if="isHideMyEmailMessage(message)" class="soft-tag blue">隐藏邮箱</span>
+                <span class="mail-subject">{{ message.subject || "无主题" }}</span>
               </span>
-              <time>{{ formatMessageTime(message.date) }}</time>
-            </button>
-          </section>
-
-          <section v-if="activeMessage" class="message-detail">
-            <dl class="message-meta">
-              <dt>主题:</dt>
-              <dd>{{ activeMessage.subject || "无主题" }}</dd>
-              <dt>发件人:</dt>
-              <dd>{{ activeMessage.from || "未知" }}</dd>
-              <dt>收件人:</dt>
-              <dd>{{ activeMessage.to || "未知" }}</dd>
-              <dt>时间:</dt>
-              <dd>{{ formatDate(activeMessage.date) }}</dd>
-            </dl>
-
-            <div v-if="activeCode" class="code-line">
-              <strong>可能验证码:</strong>
-              <span>{{ activeCode }}</span>
-            </div>
-
-            <div class="message-body">
-              <p>{{ activeMessage.preview || "无正文摘要" }}</p>
-            </div>
-          </section>
-        </template>
+              <span class="preview">{{ message.preview || "无正文摘要" }}</span>
+            </span>
+            <time>{{ formatMessageTime(message.date) }}</time>
+          </button>
+        </section>
       </section>
 
       <section v-if="activeTab === 'codes'" class="code-view">
@@ -1044,6 +1033,48 @@ onMounted(async () => {
           </div>
         </article>
       </section>
+
+      <div
+        v-if="mailModalOpen && modalMessage"
+        class="mail-modal-backdrop"
+        role="presentation"
+        @click.self="closeMailModal"
+      >
+        <section class="mail-modal" role="dialog" aria-modal="true" aria-labelledby="mail-modal-title">
+          <header class="mail-modal-header">
+            <div class="mail-modal-title-group">
+              <span class="soft-tag blue">邮件详情</span>
+              <h3 id="mail-modal-title">{{ modalMessage.subject || "无主题" }}</h3>
+              <p>{{ senderName(modalMessage) }} · {{ formatMessageTime(modalMessage.date) }}</p>
+            </div>
+            <button class="icon-button mail-modal-close" type="button" aria-label="关闭邮件详情" title="关闭" @click="closeMailModal">
+              <X :size="18" />
+            </button>
+          </header>
+
+          <div class="mail-modal-scroll">
+            <dl class="message-meta mail-modal-meta">
+              <dt>主题:</dt>
+              <dd>{{ modalMessage.subject || "无主题" }}</dd>
+              <dt>发件人:</dt>
+              <dd>{{ modalMessage.from || "未知" }}</dd>
+              <dt>收件人:</dt>
+              <dd>{{ modalMessage.to || "未知" }}</dd>
+              <dt>时间:</dt>
+              <dd>{{ formatDate(modalMessage.date) }}</dd>
+            </dl>
+
+            <div v-if="modalCode" class="code-line mail-modal-code">
+              <strong>可能验证码:</strong>
+              <span>{{ modalCode }}</span>
+            </div>
+
+            <div class="mail-modal-body">
+              <p>{{ modalBody }}</p>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   </main>
 </template>

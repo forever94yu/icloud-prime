@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.3 - 2026-08-11 12:10 +08:00
+
+- Improved the inbox reading workflow by opening clicked messages in a centered detail modal.
+- Removed the old bottom-of-page mail detail reading pattern from the primary inbox flow.
+- Added modal metadata for subject, sender, recipient, time, detected verification code, and body preview.
+- Added click-outside and close-button handling for the mail detail modal.
+- Updated responsive styling for the inbox list and modal layout.
+- Updated README usage notes and rebuilt embedded web assets for the new frontend behavior.
+
 ## v0.1.2 - 2026-08-10 00:46 +08:00
 
 - Refreshed the web console visual design across account, creation, alias list, inbox, verification code, and settings views.
