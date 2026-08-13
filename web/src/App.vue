@@ -84,6 +84,18 @@ type InboxData = {
   messages: Message[] | null;
 };
 
+type MessageDetailData = {
+  account_id: string;
+  method: string;
+  message: Message;
+};
+
+type MessageBatchData = {
+  account_id: string;
+  method: string;
+  messages: Message[] | null;
+};
+
 type CreateData = {
   email: string;
   label: string;
@@ -184,8 +196,11 @@ const busy = ref({
   jobs: false,
   jobAction: false,
   inbox: false,
+  message: false,
+  prefetch: false,
 });
 const inboxMeta = ref({ method: "", count: 0, folder: "all" });
+const prefetchSeq = ref(0);
 
 const activeAccount = computed(() =>
   accounts.value.find((account) => account.id === selectedAccountId.value),
@@ -249,7 +264,11 @@ const activeMessage = computed(() => {
 });
 const modalMessage = computed(() => (mailModalOpen.value ? activeMessage.value : undefined));
 const modalCode = computed(() => extractVerificationCode(modalMessage.value));
-const modalBody = computed(() => modalMessage.value?.body || modalMessage.value?.preview || "无正文摘要");
+const modalBody = computed(() => {
+  if (busy.value.message) return "正在读取正文...";
+  if (modalMessage.value?.uid && busy.value.prefetch && !modalMessage.value.body) return "正文后台加载中...";
+  return modalMessage.value?.body || modalMessage.value?.preview || "无正文摘要";
+});
 const extractedCodes = computed(() =>
   visibleMessages.value
     .map((message) => ({ message, code: extractVerificationCode(message) }))
@@ -293,11 +312,13 @@ async function loadAccounts() {
   }
 }
 
-async function loadMailboxes() {
+async function loadMailboxes(options: { force?: boolean } = {}) {
   if (!selectedAccountId.value) return;
   busy.value.folders = true;
   try {
-    const data = await api<MailboxesData>(`/api/mailboxes?account_id=${selectedAccountId.value}`);
+    const params = new URLSearchParams({ account_id: selectedAccountId.value });
+    if (options.force) params.set("refresh", "1");
+    const data = await api<MailboxesData>(`/api/mailboxes?${params.toString()}`);
     folders.value = data.folders?.length ? data.folders : defaultFolders;
   } catch {
     folders.value = defaultFolders;
@@ -306,12 +327,14 @@ async function loadMailboxes() {
   }
 }
 
-async function loadAliases() {
+async function loadAliases(options: { force?: boolean } = {}) {
   if (!selectedAccountId.value) return;
   busy.value.aliases = true;
   clearFeedback();
   try {
-    const data = await api<AliasesData>(`/api/aliases?account_id=${selectedAccountId.value}`);
+    const params = new URLSearchParams({ account_id: selectedAccountId.value });
+    if (options.force) params.set("refresh", "1");
+    const data = await api<AliasesData>(`/api/aliases?${params.toString()}`);
     aliases.value = data.aliases ?? [];
     if (selectedAlias.value && !aliases.value.some((item) => item.email === selectedAlias.value)) {
       selectedAlias.value = "";
@@ -337,6 +360,16 @@ async function loadCreateJobs() {
   }
 }
 
+async function loadAccountData(options: { includeInbox?: boolean; withBody?: boolean; force?: boolean } = {}) {
+  if (!selectedAccountId.value) return;
+  await Promise.all([
+    loadMailboxes({ force: options.force }),
+    loadAliases({ force: options.force }),
+    loadCreateJobs(),
+    options.includeInbox ? loadInbox(selectedAlias.value, { prefetchBody: Boolean(options.withBody) }) : Promise.resolve(),
+  ]);
+}
+
 async function createAlias() {
   if (!selectedAccountId.value) return;
   busy.value.create = true;
@@ -351,9 +384,7 @@ async function createAlias() {
     selectedAlias.value = created.email;
     selectedFolder.value = "all";
     newLabel.value = "";
-    await loadAliases();
-    await loadCreateJobs();
-    await loadInbox(created.email);
+    await Promise.all([loadAliases({ force: true }), loadCreateJobs(), loadInbox(created.email)]);
     activeTab.value = "inbox";
   } catch (err) {
     setError(err);
@@ -385,8 +416,7 @@ async function createAliasBatch() {
     notice.value =
       data.message ||
       `已创建 ${data.created_count} 个别名${data.skipped_count ? `，跳过 ${data.skipped_count} 个` : ""}`;
-    await loadAliases();
-    await loadCreateJobs();
+    await Promise.all([loadAliases({ force: true }), loadCreateJobs()]);
     if (lastCreated) {
       await loadInbox(lastCreated.email);
       activeTab.value = "inbox";
@@ -467,7 +497,7 @@ async function deleteCreateJob(job: CreateJob) {
   }
 }
 
-async function loadInbox(alias = selectedAlias.value) {
+async function loadInbox(alias = selectedAlias.value, options: { prefetchBody?: boolean } = {}) {
   if (!selectedAccountId.value) return;
   busy.value.inbox = true;
   mailModalOpen.value = false;
@@ -490,6 +520,7 @@ async function loadInbox(alias = selectedAlias.value) {
     if (!messages.value.some((message) => message.id === selectedMessageId.value)) {
       selectedMessageId.value = messages.value[0]?.id ?? "";
     }
+    void prefetchMessageBodies({ priorityId: selectedMessageId.value, force: Boolean(options.prefetchBody) });
   } catch (err) {
     setError(err);
   } finally {
@@ -499,20 +530,14 @@ async function loadInbox(alias = selectedAlias.value) {
 
 async function refreshAll() {
   await loadAccounts();
-  await loadMailboxes();
-  await loadAliases();
-  await loadCreateJobs();
-  await loadInbox(selectedAlias.value);
+  await loadAccountData({ includeInbox: true, withBody: activeTab.value === "codes", force: true });
 }
 
 async function handleAccountChange() {
   selectedAlias.value = "";
   selectedMessageId.value = "";
   mailModalOpen.value = false;
-  await loadMailboxes();
-  await loadAliases();
-  await loadCreateJobs();
-  await loadInbox();
+  await loadAccountData({ includeInbox: true, withBody: activeTab.value === "codes" });
 }
 
 async function chooseAlias(alias: Alias) {
@@ -522,9 +547,19 @@ async function chooseAlias(alias: Alias) {
   await loadInbox(alias.email);
 }
 
-function selectMessage(message: Message) {
+function switchTab(tab: AppTab) {
+  activeTab.value = tab;
+  if (tab === "codes" && selectedAccountId.value) {
+    void ensureCodeBodies();
+  }
+}
+
+async function selectMessage(message: Message) {
   selectedMessageId.value = message.id;
   mailModalOpen.value = true;
+  if (!message.body) {
+    void prefetchMessageBodies({ priorityId: message.id, force: true });
+  }
 }
 
 function closeMailModal() {
@@ -542,6 +577,79 @@ function clearAliasSelection() {
   mailModalOpen.value = false;
   activeTab.value = "inbox";
   void loadInbox();
+}
+
+async function loadMessageDetail(message: Message) {
+  if (!selectedAccountId.value || message.body || !message.uid) return;
+  busy.value.message = true;
+  try {
+    const params = new URLSearchParams({
+      account_id: selectedAccountId.value,
+      folder: message.folder || selectedFolder.value || "INBOX",
+    });
+    const data = await api<MessageDetailData>(`/api/messages/${encodeURIComponent(message.uid)}?${params.toString()}`);
+    const full = data.message;
+    messages.value = messages.value.map((item) =>
+      item.id === message.id ? { ...item, ...full, id: item.id, uid: item.uid, folder: item.folder } : item,
+    );
+  } catch (err) {
+    setError(err);
+  } finally {
+    busy.value.message = false;
+  }
+}
+
+async function ensureCodeBodies() {
+  if (messages.value.length === 0) {
+    await loadInbox(selectedAlias.value, { prefetchBody: true });
+    return;
+  }
+  void prefetchMessageBodies({ force: true });
+}
+
+async function prefetchMessageBodies(options: { priorityId?: string; force?: boolean } = {}) {
+  if (!selectedAccountId.value) return;
+  const limit = Math.min(50, Math.max(1, Number(mailLimit.value) || 10));
+  const candidates = [...visibleMessages.value]
+    .sort((a, b) => {
+      if (a.id === options.priorityId) return -1;
+      if (b.id === options.priorityId) return 1;
+      return 0;
+    })
+    .filter((message) => message.uid && (options.force || !message.body))
+    .slice(0, limit);
+  if (candidates.length === 0) return;
+
+  const seq = prefetchSeq.value + 1;
+  prefetchSeq.value = seq;
+  busy.value.prefetch = true;
+  try {
+    const data = await api<MessageBatchData>("/api/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        account_id: selectedAccountId.value,
+        messages: candidates.map((message) => ({
+          uid: message.uid,
+          folder: message.folder || selectedFolder.value || "INBOX",
+        })),
+      }),
+    });
+    if (seq !== prefetchSeq.value) return;
+    const byKey = new Map<string, Message>();
+    for (const message of data.messages ?? []) {
+      if (message.uid) byKey.set(`${message.folder || "INBOX"}:${message.uid}`, message);
+    }
+    messages.value = messages.value.map((item) => {
+      const full = item.uid ? byKey.get(`${item.folder || selectedFolder.value || "INBOX"}:${item.uid}`) : undefined;
+      return full ? { ...item, ...full, id: item.id, uid: item.uid, folder: item.folder } : item;
+    });
+  } catch (err) {
+    if (options.force) setError(err);
+  } finally {
+    if (seq === prefetchSeq.value) {
+      busy.value.prefetch = false;
+    }
+  }
 }
 
 function formatDate(value?: string) {
@@ -611,7 +719,7 @@ function isUnreadMessage(message: Message) {
 
 function extractVerificationCode(message?: Message) {
   if (!message) return "";
-  const text = [message.subject, message.preview].filter(Boolean).join("\n");
+  const text = [message.subject, message.preview, message.body].filter(Boolean).join("\n");
   const sixDigit = text.match(/(?:^|\D)(\d{6})(?!\d)/);
   if (sixDigit?.[1]) return sixDigit[1];
   const shortCode = text.match(/(?:^|\D)(\d{4,8})(?!\d)/);
@@ -620,10 +728,7 @@ function extractVerificationCode(message?: Message) {
 
 onMounted(async () => {
   await loadAccounts();
-  await loadMailboxes();
-  await loadAliases();
-  await loadCreateJobs();
-  await loadInbox();
+  await loadAccountData({ includeInbox: true });
 });
 </script>
 
@@ -646,7 +751,7 @@ onMounted(async () => {
           </span>
           <span class="status-pill muted">已生成: {{ aliases.length }}</span>
           <button class="icon-button" type="button" :disabled="busy.accounts" aria-label="刷新" title="刷新" @click="refreshAll">
-            <RefreshCw :class="{ spin: busy.accounts || busy.aliases || busy.inbox }" :size="17" />
+            <RefreshCw :class="{ spin: busy.accounts || busy.aliases || busy.inbox || busy.prefetch }" :size="17" />
           </button>
         </div>
       </header>
@@ -660,7 +765,7 @@ onMounted(async () => {
           type="button"
           role="tab"
           :aria-selected="activeTab === item.id"
-          @click="activeTab = item.id"
+          @click="switchTab(item.id)"
         >
           {{ item.label }}
         </button>
@@ -860,7 +965,7 @@ onMounted(async () => {
       <section v-if="activeTab === 'aliases'" class="alias-view">
         <div class="view-toolbar">
           <span class="toolbar-note">{{ aliases.length }} 个别名</span>
-          <button class="secondary-button" type="button" :disabled="busy.aliases" @click="loadAliases">
+          <button class="secondary-button" type="button" :disabled="busy.aliases" @click="loadAliases({ force: true })">
             <RefreshCw :class="{ spin: busy.aliases }" :size="16" />
             更新列表
           </button>
@@ -950,6 +1055,7 @@ onMounted(async () => {
 
       <section v-if="activeTab === 'codes'" class="code-view">
         <div v-if="visibleMessages.length === 0" class="empty-state">当前没有可提取验证码的邮件。</div>
+        <div v-else-if="busy.prefetch && extractedCodes.length === 0" class="empty-state">正在解析邮件正文...</div>
         <div v-else-if="extractedCodes.length === 0" class="empty-state">当前邮件没有识别到验证码。</div>
         <div v-else class="surface code-panel">
           <div class="code-grid">
@@ -1002,7 +1108,7 @@ onMounted(async () => {
             </div>
           </div>
           <button class="primary-button settings-refresh" type="button" :disabled="busy.accounts" @click="refreshAll">
-            <RefreshCw :class="{ spin: busy.accounts || busy.aliases || busy.inbox }" :size="17" />
+            <RefreshCw :class="{ spin: busy.accounts || busy.aliases || busy.inbox || busy.prefetch }" :size="17" />
             刷新状态
           </button>
         </article>
@@ -1069,7 +1175,7 @@ onMounted(async () => {
               <span>{{ modalCode }}</span>
             </div>
 
-            <div class="mail-modal-body">
+            <div class="mail-modal-body" :class="{ loading: busy.message }">
               <p>{{ modalBody }}</p>
             </div>
           </div>

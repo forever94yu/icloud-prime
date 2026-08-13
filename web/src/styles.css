@@ -992,6 +992,10 @@ h1 {
   margin: 0;
 }
 
+.mail-modal-body.loading {
+  color: var(--muted);
+}
+
 .code-panel {
   padding: 20px;
   border-radius: 20px;

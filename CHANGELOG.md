@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.4 - 2026-08-13 23:35 +08:00
+
+- Added full-message detail APIs for single-message and batch body loading.
+- Added server-side message detail caching with defensive copies to avoid cache mutation.
+- Updated IMAP mail reading to fetch full message bodies on demand and in batches.
+- Updated the inbox frontend to prefetch visible message bodies in the background.
+- Improved verification-code extraction by using full message bodies when available.
+- Rebuilt embedded web assets and updated README/API documentation for the message detail flow.
+- Added tests for message cache copy safety and updated mail parsing coverage.
+
 ## v0.1.3 - 2026-08-11 12:10 +08:00
 
 - Improved the inbox reading workflow by opening clicked messages in a centered detail modal.

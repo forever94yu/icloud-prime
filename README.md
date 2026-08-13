@@ -51,6 +51,7 @@ Your local `data/create_jobs.json` contains scheduled alias creation jobs and st
 - Deactivate, reactivate, and delete aliases
 - Read mail through IMAP first, with Web API Cookie fallback
 - Click inbox messages to open a centered detail modal instead of scrolling to the bottom
+- Lazy-load and cache full message bodies for faster repeated mail-detail viewing
 - Support for `icloud.com` and `icloud.com.cn`
 - Optional HTTP/SOCKS5 proxy settings
 - Windows 10 portable release package
@@ -97,7 +98,7 @@ Open the Releases page:
 Download:
 
 ```text
-icloud-prime-windows10-portable-v0.1.3.zip
+icloud-prime-windows10-portable-v0.1.4.zip
 ```
 
 ### 2. Extract
@@ -111,7 +112,7 @@ D:\Tools\icloud-prime
 The extracted folder contains:
 
 ```text
-icloud-prime-windows10-portable-v0.1.3/
+icloud-prime-windows10-portable-v0.1.4/
 |-- icloud-prime.exe
 |-- start.bat
 |-- stop.bat
@@ -295,6 +296,9 @@ In the web console, select an account and alias.
 Click a message row to open the full mail details in a modal window. The modal
 shows the subject, sender, recipient, time, detected verification code, and body
 preview without forcing you to scroll to the bottom of the page.
+The app now loads full message bodies on demand and prefetches visible messages
+in the background, so verification-code extraction and repeated detail views are
+faster after the first read.
 
 API example:
 
@@ -436,6 +440,8 @@ Mail:
 
 ```text
 GET /api/inbox?account_id=acc_1&alias=alias@icloud.com&limit=20&days=7
+GET /api/messages/:id?account_id=acc_1&folder=INBOX
+POST /api/messages
 GET /api/mailboxes?account_id=acc_1
 ```
 

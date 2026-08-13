@@ -141,8 +141,22 @@ func (c *Client) ListInbox(limit int, days int) ([]Message, error) {
 	return c.ListFolder("inbox", limit, days)
 }
 
+// ListInboxWithBodies 拉取收件箱最近邮件,并解析正文用于验证码识别。
+func (c *Client) ListInboxWithBodies(limit int, days int) ([]Message, error) {
+	return c.ListFolderWithBodies("inbox", limit, days)
+}
+
 // ListFolder 拉取指定文件夹的最近邮件摘要。folder 可用 inbox、junk、all 或真实 IMAP 文件夹名。
 func (c *Client) ListFolder(folder string, limit int, days int) ([]Message, error) {
+	return c.listFolder(folder, limit, days, false)
+}
+
+// ListFolderWithBodies 拉取指定文件夹的最近邮件,并解析正文用于验证码识别。
+func (c *Client) ListFolderWithBodies(folder string, limit int, days int) ([]Message, error) {
+	return c.listFolder(folder, limit, days, true)
+}
+
+func (c *Client) listFolder(folder string, limit int, days int, includeBody bool) ([]Message, error) {
 	if c.cli == nil {
 		return nil, fmt.Errorf("未连接")
 	}
@@ -157,7 +171,7 @@ func (c *Client) ListFolder(folder string, limit int, days int) ([]Message, erro
 
 	var all []Message
 	for _, name := range folders {
-		messages, err := c.listMailbox(name, limit, days)
+		messages, err := c.listMailbox(name, limit, days, includeBody)
 		if err != nil {
 			continue
 		}
@@ -170,7 +184,7 @@ func (c *Client) ListFolder(folder string, limit int, days int) ([]Message, erro
 	return all, nil
 }
 
-func (c *Client) listMailbox(folder string, limit int, days int) ([]Message, error) {
+func (c *Client) listMailbox(folder string, limit int, days int, includeBody bool) ([]Message, error) {
 	mbox, err := c.cli.Select(folder, true)
 	if err != nil {
 		return nil, err
@@ -189,13 +203,16 @@ func (c *Client) listMailbox(folder string, limit int, days int) ([]Message, err
 	seqset := new(imap.SeqSet)
 	seqset.AddRange(from, mbox.Messages)
 
-	// 拉取完整正文,以便填充 Preview(OTP 验证码在正文中)
-	section := &imap.BodySectionName{}
 	items := []imap.FetchItem{
 		imap.FetchUid,
 		imap.FetchEnvelope,
 		imap.FetchInternalDate,
-		section.FetchItem(),
+	}
+	parser := toMessageSummary
+	if includeBody {
+		section := &imap.BodySectionName{Peek: true}
+		items = append(items, section.FetchItem())
+		parser = toMessageWithBody
 	}
 
 	messages := make(chan *imap.Message, limit)
@@ -206,7 +223,7 @@ func (c *Client) listMailbox(folder string, limit int, days int) ([]Message, err
 
 	var out []Message
 	for msg := range messages {
-		m := toMessageWithBody(msg, folder)
+		m := parser(msg, folder)
 		// days 过滤
 		if days > 0 && olderThanDays(m.Date, days) {
 			continue
@@ -229,6 +246,15 @@ func (c *Client) FindByRecipient(recipient string, limit int, days int) ([]Messa
 
 // FindByRecipientInFolder 查找指定文件夹中发给隐私邮箱别名的邮件。
 func (c *Client) FindByRecipientInFolder(recipient string, folder string, limit int, days int) ([]Message, error) {
+	return c.findByRecipientInFolder(recipient, folder, limit, days, false)
+}
+
+// FindByRecipientInFolderWithBodies 查找指定文件夹中发给隐私邮箱别名的邮件,并解析正文。
+func (c *Client) FindByRecipientInFolderWithBodies(recipient string, folder string, limit int, days int) ([]Message, error) {
+	return c.findByRecipientInFolder(recipient, folder, limit, days, true)
+}
+
+func (c *Client) findByRecipientInFolder(recipient string, folder string, limit int, days int, includeBody bool) ([]Message, error) {
 	if c.cli == nil {
 		return nil, fmt.Errorf("未连接")
 	}
@@ -244,7 +270,7 @@ func (c *Client) FindByRecipientInFolder(recipient string, folder string, limit 
 	var out []Message
 	seen := map[string]bool{}
 	for _, name := range folders {
-		messages, err := c.findByRecipientInMailbox(recipient, name, limit, days)
+		messages, err := c.findByRecipientInMailbox(recipient, name, limit, days, includeBody)
 		if err != nil {
 			continue
 		}
@@ -264,22 +290,17 @@ func (c *Client) FindByRecipientInFolder(recipient string, folder string, limit 
 	return out, nil
 }
 
-func (c *Client) findByRecipientInMailbox(recipient string, folder string, limit int, days int) ([]Message, error) {
+func (c *Client) findByRecipientInMailbox(recipient string, folder string, limit int, days int, includeBody bool) ([]Message, error) {
 	// 先尝试服务端 TO 搜索；部分 Hide My Email 邮件会把收件人改成“隐藏邮件地址”，所以后面还有本地兜底。
 	if _, err := c.cli.Select(folder, true); err != nil {
 		return nil, err
 	}
-	criteria := imap.NewSearchCriteria()
-	criteria.Header.Add("To", recipient)
-	if days > 0 {
-		criteria.Since = time.Now().AddDate(0, 0, -days)
-	}
-	uids, err := c.cli.UidSearch(criteria)
+	uids, err := c.searchRecipientUIDs(recipient, days)
 	if err == nil && len(uids) > 0 {
-		return c.fetchByUIDs(uids, folder, limit)
+		return c.fetchByUIDs(uids, folder, limit, includeBody)
 	}
 
-	all, err := c.listMailbox(folder, limit*3, days)
+	all, err := c.listMailbox(folder, limit*3, days, true)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +316,27 @@ func (c *Client) findByRecipientInMailbox(recipient string, folder string, limit
 	return out, nil
 }
 
-func (c *Client) fetchByUIDs(uids []uint32, folder string, limit int) ([]Message, error) {
+func (c *Client) searchRecipientUIDs(recipient string, days int) ([]uint32, error) {
+	headers := []string{"To", "Delivered-To", "X-Original-To", "Envelope-To"}
+	var lastErr error
+	for _, header := range headers {
+		criteria := imap.NewSearchCriteria()
+		criteria.Header.Add(header, recipient)
+		if days > 0 {
+			criteria.Since = time.Now().AddDate(0, 0, -days)
+		}
+		uids, err := c.cli.UidSearch(criteria)
+		if err == nil && len(uids) > 0 {
+			return uids, nil
+		}
+		if err != nil && lastErr == nil {
+			lastErr = err
+		}
+	}
+	return nil, lastErr
+}
+
+func (c *Client) fetchByUIDs(uids []uint32, folder string, limit int, includeBody bool) ([]Message, error) {
 	if len(uids) == 0 {
 		return []Message{}, nil
 	}
@@ -308,9 +349,13 @@ func (c *Client) fetchByUIDs(uids []uint32, folder string, limit int) ([]Message
 		seqset.AddNum(uid)
 	}
 
-	// 拉取完整正文,以便填充 Preview(OTP 验证码在正文中)
-	section := &imap.BodySectionName{}
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, section.FetchItem()}
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate}
+	parser := toMessageSummary
+	if includeBody {
+		section := &imap.BodySectionName{Peek: true}
+		items = append(items, section.FetchItem())
+		parser = toMessageWithBody
+	}
 	messages := make(chan *imap.Message, len(uids))
 	done := make(chan error, 1)
 	go func() {
@@ -319,7 +364,7 @@ func (c *Client) fetchByUIDs(uids []uint32, folder string, limit int) ([]Message
 
 	var out []Message
 	for msg := range messages {
-		out = append(out, toMessageWithBody(msg, folder))
+		out = append(out, parser(msg, folder))
 	}
 	if err := <-done; err != nil {
 		return nil, err
@@ -330,41 +375,72 @@ func (c *Client) fetchByUIDs(uids []uint32, folder string, limit int) ([]Message
 
 // GetFull 获取单封邮件的完整内容(含正文)。
 func (c *Client) GetFull(uid uint32) (*FullMessage, error) {
+	return c.GetFullInFolder("INBOX", uid)
+}
+
+// GetFullInFolder 获取指定文件夹中单封邮件的完整内容。
+func (c *Client) GetFullInFolder(folder string, uid uint32) (*FullMessage, error) {
+	messages, err := c.GetFullBatchInFolder(folder, []uint32{uid})
+	if err != nil {
+		return nil, err
+	}
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("邮件不存在 (uid=%d)", uid)
+	}
+	return messages[0], nil
+}
+
+// GetFullBatchInFolder 批量获取指定文件夹中的完整邮件内容。
+func (c *Client) GetFullBatchInFolder(folder string, uids []uint32) ([]*FullMessage, error) {
 	if c.cli == nil {
 		return nil, fmt.Errorf("未连接")
 	}
-	if _, err := c.cli.Select("INBOX", true); err != nil {
+	if folder == "" {
+		folder = "INBOX"
+	}
+	if len(uids) == 0 {
+		return []*FullMessage{}, nil
+	}
+	if _, err := c.cli.Select(folder, true); err != nil {
 		return nil, err
 	}
 
 	seqset := new(imap.SeqSet)
-	seqset.AddNum(uid)
+	for _, uid := range uids {
+		seqset.AddNum(uid)
+	}
 
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, imap.FetchRFC822}
-	messages := make(chan *imap.Message, 1)
+	section := &imap.BodySectionName{Peek: true}
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, section.FetchItem()}
+	messages := make(chan *imap.Message, len(uids))
 	done := make(chan error, 1)
 	go func() {
 		done <- c.cli.UidFetch(seqset, items, messages)
 	}()
 
-	msg := <-messages
+	var out []*FullMessage
+	for msg := range messages {
+		if msg == nil {
+			continue
+		}
+		message := toMessage(msg, folder)
+		full := &FullMessage{Message: message}
+		if r := msg.GetBody(section); r != nil {
+			if em, err := mail.ReadMessage(r); err == nil {
+				if body, err := readBody(em); err == nil {
+					full.Body = strings.TrimSpace(body)
+					full.Preview = full.Body
+				}
+				full.ContentType = em.Header.Get("Content-Type")
+			}
+		}
+		out = append(out, full)
+	}
 	if err := <-done; err != nil {
 		return nil, err
 	}
-	if msg == nil {
-		return nil, fmt.Errorf("邮件不存在 (uid=%d)", uid)
-	}
-
-	full := &FullMessage{Message: toMessage(msg, "INBOX")}
-	// 解析正文
-	if r := msg.GetBody(&imap.BodySectionName{}); r != nil {
-		if em, err := mail.ReadMessage(r); err == nil {
-			body, _ := readBody(em)
-			full.Body = body
-			full.ContentType = em.Header.Get("Content-Type")
-		}
-	}
-	return full, nil
+	sortFullMessages(out)
+	return out, nil
 }
 
 // ---- 解析工具 ----
@@ -403,6 +479,10 @@ func toMessage(msg *imap.Message, folder string) Message {
 		m.To = decodeHeader(m.To)
 	}
 	return m
+}
+
+func toMessageSummary(msg *imap.Message, folder string) Message {
+	return toMessage(msg, folder)
 }
 
 // toMessageWithBody 在 toMessage 基础上解析正文填充 Preview(供 OTP 提取)。
@@ -444,12 +524,15 @@ func (c *Client) resolveFolders(folder string) ([]string, error) {
 	if folder == "" || role == "inbox" {
 		return []string{"INBOX"}, nil
 	}
+	if role == "all" {
+		return []string{"INBOX", "Junk"}, nil
+	}
+	if role == "junk" || role == "spam" {
+		return []string{"Junk"}, nil
+	}
 
 	mailboxes, err := c.ListMailboxes()
 	if err != nil {
-		if role == "junk" || role == "spam" {
-			return []string{"Junk"}, nil
-		}
 		return []string{folder}, nil
 	}
 
@@ -541,6 +624,17 @@ func folderSortRank(folder Folder) int {
 }
 
 func sortMessages(messages []Message) {
+	sort.SliceStable(messages, func(i, j int) bool {
+		ti, _ := parseMessageDate(messages[i].Date)
+		tj, _ := parseMessageDate(messages[j].Date)
+		if ti.IsZero() || tj.IsZero() {
+			return messages[i].Date > messages[j].Date
+		}
+		return ti.After(tj)
+	})
+}
+
+func sortFullMessages(messages []*FullMessage) {
 	sort.SliceStable(messages, func(i, j int) bool {
 		ti, _ := parseMessageDate(messages[i].Date)
 		tj, _ := parseMessageDate(messages[j].Date)

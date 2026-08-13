@@ -361,6 +361,8 @@ Query parameters:
 - `folder`: optional; defaults to `inbox`.
 - `limit`: optional; defaults to `20`.
 - `days`: optional; defaults to `7` for IMAP mode.
+- `body`: optional; set to `1` or `true` to include parsed body text in the
+  returned message previews when using IMAP.
 
 Read order:
 
@@ -368,6 +370,73 @@ Read order:
 2. Web API through Cookie fallback.
 
 Response includes `method` with `imap` or `web_api`.
+
+### Read One Full Message
+
+```http
+GET /api/messages/:id?account_id=acc_1&folder=INBOX
+```
+
+Path and query parameters:
+
+- `:id`: required IMAP UID. Values such as `INBOX:42` are also accepted and
+  automatically split into folder and UID.
+- `account_id`: required account ID.
+- `folder`: optional IMAP folder name; defaults to `INBOX`.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "account_id": "acc_1",
+    "message": {
+      "id": "INBOX:42",
+      "uid": "42",
+      "folder": "INBOX",
+      "subject": "Your verification code",
+      "from": "Example <noreply@example.com>",
+      "to": "alias@icloud.com",
+      "date": "2026-08-13T15:30:00Z",
+      "preview": "Your code is 123456",
+      "body": "Your code is 123456",
+      "content_type": "text/plain"
+    },
+    "method": "imap",
+    "cached": false
+  }
+}
+```
+
+Full-message responses are cached briefly so repeated modal opens do not need to
+fetch the same IMAP body again.
+
+### Batch Read Full Messages
+
+```http
+POST /api/messages
+Content-Type: application/json
+```
+
+Body:
+
+```json
+{
+  "account_id": "acc_1",
+  "messages": [
+    { "uid": "42", "folder": "INBOX" },
+    { "uid": "43", "folder": "Junk" }
+  ]
+}
+```
+
+Notes:
+
+- `messages` is required and may contain up to `50` message references.
+- `folder` defaults to `INBOX` for each message.
+- Cached messages are returned immediately; uncached messages are grouped by
+  folder and fetched in batches through IMAP.
 
 ### List Mailboxes
 

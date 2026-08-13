@@ -1,9 +1,12 @@
 package mail
 
 import (
+	"bytes"
+	"io"
 	netmail "net/mail"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-imap"
 )
@@ -109,5 +112,41 @@ func TestMessageMatchesAliasFromRawHeaders(t *testing.T) {
 
 	if !message.matches("gratins.burners1e@icloud.com") {
 		t.Fatal("expected alias to match raw header text")
+	}
+}
+
+func TestToMessageSummaryDoesNotReadFetchedBody(t *testing.T) {
+	section := &imap.BodySectionName{}
+	msg := &imap.Message{
+		Uid: 42,
+		Envelope: &imap.Envelope{
+			Subject: "One time code",
+			Date:    time.Date(2026, 8, 13, 9, 30, 0, 0, time.UTC),
+			From:    []*imap.Address{{PersonalName: "Service", MailboxName: "noreply", HostName: "example.com"}},
+			To:      []*imap.Address{{MailboxName: "alias", HostName: "icloud.com"}},
+		},
+		Body: map[*imap.BodySectionName]imap.Literal{
+			section: bytes.NewBufferString("Content-Type: text/plain\r\n\r\nCode 123456"),
+		},
+	}
+
+	summary := toMessageSummary(msg, "INBOX")
+
+	if summary.Preview != "" {
+		t.Fatalf("expected summary preview to stay empty, got %q", summary.Preview)
+	}
+	if summary.match != "" {
+		t.Fatalf("expected summary match text to stay empty, got %q", summary.match)
+	}
+	body := msg.GetBody(section)
+	if body == nil {
+		t.Fatal("test setup should include a body literal")
+	}
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read body literal: %v", err)
+	}
+	if !strings.Contains(string(raw), "Code 123456") {
+		t.Fatalf("expected body literal to remain unread, got %q", string(raw))
 	}
 }

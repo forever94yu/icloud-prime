@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,9 +27,35 @@ import (
 
 // Server 封装 Gin 引擎和账号管理器。
 type Server struct {
-	mgr       *account.Manager
-	scheduler *createjob.Scheduler
-	r         *gin.Engine
+	mgr        *account.Manager
+	scheduler  *createjob.Scheduler
+	r          *gin.Engine
+	cache      *responseCache
+	cacheTTL   time.Duration
+	folderTTL  time.Duration
+	messageTTL time.Duration
+}
+
+type responseCache struct {
+	mu        sync.RWMutex
+	aliases   map[string]aliasCacheEntry
+	mailboxes map[string]mailboxCacheEntry
+	messages  map[string]messageCacheEntry
+}
+
+type aliasCacheEntry struct {
+	expires time.Time
+	data    []hme.Alias
+}
+
+type mailboxCacheEntry struct {
+	expires time.Time
+	data    []mail.Folder
+}
+
+type messageCacheEntry struct {
+	expires time.Time
+	data    *mail.FullMessage
 }
 
 // New 创建 Server。debug 为 true 时启用 Gin 调试日志。
@@ -53,7 +80,18 @@ func NewWithScheduler(mgr *account.Manager, scheduler *createjob.Scheduler, debu
 	if !debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	s := &Server{mgr: mgr, scheduler: scheduler}
+	s := &Server{
+		mgr:       mgr,
+		scheduler: scheduler,
+		cache: &responseCache{
+			aliases:   make(map[string]aliasCacheEntry),
+			mailboxes: make(map[string]mailboxCacheEntry),
+			messages:  make(map[string]messageCacheEntry),
+		},
+		cacheTTL:   3 * time.Minute,
+		folderTTL:  10 * time.Minute,
+		messageTTL: 10 * time.Minute,
+	}
 	s.r = gin.Default() // 自带 Logger + Recovery 中间件
 	s.register()
 	s.registerStatic()
@@ -90,6 +128,8 @@ func (s *Server) register() {
 
 		// ===== 核心接口 2: 读取邮件 =====
 		api.GET("/inbox", s.listInbox)
+		api.GET("/messages/:id", s.getMessage)
+		api.POST("/messages", s.getMessages)
 		api.GET("/mailboxes", s.listMailboxes)
 
 		// ===== 别名管理 =====
@@ -101,6 +141,92 @@ func (s *Server) register() {
 		// ===== 系统 =====
 		api.POST("/reload", s.reloadConfig)
 	}
+}
+
+func (s *Server) cachedAliases(accountID string) ([]hme.Alias, bool) {
+	s.cache.mu.RLock()
+	defer s.cache.mu.RUnlock()
+	entry, ok := s.cache.aliases[accountID]
+	if !ok || time.Now().After(entry.expires) {
+		return nil, false
+	}
+	return append([]hme.Alias(nil), entry.data...), true
+}
+
+func (s *Server) setCachedAliases(accountID string, aliases []hme.Alias) {
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	s.cache.aliases[accountID] = aliasCacheEntry{
+		expires: time.Now().Add(s.cacheTTL),
+		data:    append([]hme.Alias(nil), aliases...),
+	}
+}
+
+func (s *Server) invalidateAliases(accountID string) {
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	delete(s.cache.aliases, accountID)
+}
+
+func (s *Server) cachedMailboxes(accountID string) ([]mail.Folder, bool) {
+	s.cache.mu.RLock()
+	defer s.cache.mu.RUnlock()
+	entry, ok := s.cache.mailboxes[accountID]
+	if !ok || time.Now().After(entry.expires) {
+		return nil, false
+	}
+	return append([]mail.Folder(nil), entry.data...), true
+}
+
+func (s *Server) setCachedMailboxes(accountID string, folders []mail.Folder) {
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	s.cache.mailboxes[accountID] = mailboxCacheEntry{
+		expires: time.Now().Add(s.folderTTL),
+		data:    append([]mail.Folder(nil), folders...),
+	}
+}
+
+func messageCacheKey(accountID, folder string, uid uint32) string {
+	return accountID + "|" + folder + "|" + strconv.FormatUint(uint64(uid), 10)
+}
+
+func cloneFullMessage(message *mail.FullMessage) *mail.FullMessage {
+	if message == nil {
+		return nil
+	}
+	clone := *message
+	return &clone
+}
+
+func (s *Server) cachedMessage(accountID, folder string, uid uint32) (*mail.FullMessage, bool) {
+	s.cache.mu.RLock()
+	defer s.cache.mu.RUnlock()
+	entry, ok := s.cache.messages[messageCacheKey(accountID, folder, uid)]
+	if !ok || time.Now().After(entry.expires) {
+		return nil, false
+	}
+	return cloneFullMessage(entry.data), true
+}
+
+func (s *Server) setCachedMessage(accountID, folder string, uid uint32, message *mail.FullMessage) {
+	if message == nil {
+		return
+	}
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	s.cache.messages[messageCacheKey(accountID, folder, uid)] = messageCacheEntry{
+		expires: time.Now().Add(s.messageTTL),
+		data:    cloneFullMessage(message),
+	}
+}
+
+func (s *Server) clearCache() {
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	s.cache.aliases = make(map[string]aliasCacheEntry)
+	s.cache.mailboxes = make(map[string]mailboxCacheEntry)
+	s.cache.messages = make(map[string]messageCacheEntry)
 }
 
 // ---- 统一响应 ----
@@ -181,6 +307,7 @@ func (s *Server) createAlias(c *gin.Context) {
 		"created_at": result.CreatedAt,
 		"account_id": req.AccountID,
 	})
+	s.invalidateAliases(req.AccountID)
 }
 
 func (s *Server) createAliasBatch(c *gin.Context) {
@@ -200,6 +327,9 @@ func (s *Server) createAliasBatch(c *gin.Context) {
 			fail(c, http.StatusBadGateway, "批量创建失败: "+msg)
 		}
 		return
+	}
+	if resp.CreatedCount > 0 {
+		s.invalidateAliases(req.AccountID)
 	}
 	ok(c, resp)
 }
@@ -278,6 +408,7 @@ func (s *Server) listInbox(c *gin.Context) {
 	folder := strings.TrimSpace(c.DefaultQuery("folder", "inbox"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
+	withBody := c.Query("body") == "1" || c.Query("body") == "true"
 
 	// 优先使用 IMAP (App Password 认证)
 	mc, err := s.mgr.MailClient(accountID)
@@ -286,7 +417,13 @@ func (s *Server) listInbox(c *gin.Context) {
 			defer mc.Disconnect()
 			var messages []mail.Message
 			if alias != "" {
-				messages, err = mc.FindByRecipientInFolder(alias, folder, limit, days)
+				if withBody {
+					messages, err = mc.FindByRecipientInFolderWithBodies(alias, folder, limit, days)
+				} else {
+					messages, err = mc.FindByRecipientInFolder(alias, folder, limit, days)
+				}
+			} else if withBody {
+				messages, err = mc.ListFolderWithBodies(folder, limit, days)
 			} else {
 				messages, err = mc.ListFolder(folder, limit, days)
 			}
@@ -346,11 +483,169 @@ func (s *Server) listInbox(c *gin.Context) {
 	}
 }
 
+func (s *Server) getMessage(c *gin.Context) {
+	accountID := c.Query("account_id")
+	if accountID == "" {
+		fail(c, http.StatusBadRequest, "参数缺失: account_id")
+		return
+	}
+	folder := strings.TrimSpace(c.DefaultQuery("folder", "INBOX"))
+	uidText := strings.TrimSpace(c.Param("id"))
+	if strings.Contains(uidText, ":") && folder == "INBOX" {
+		parts := strings.SplitN(uidText, ":", 2)
+		folder = parts[0]
+		uidText = parts[1]
+	}
+	uid64, err := strconv.ParseUint(uidText, 10, 32)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "邮件 ID 必须是 IMAP UID")
+		return
+	}
+	uid := uint32(uid64)
+
+	if message, cached := s.cachedMessage(accountID, folder, uid); cached {
+		ok(c, gin.H{
+			"account_id": accountID,
+			"message":    message,
+			"method":     "cache",
+			"cached":     true,
+		})
+		return
+	}
+
+	mc, err := s.mgr.MailClient(accountID)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "读取邮件详情需要 App Password: "+err.Error())
+		return
+	}
+	if err := mc.Connect(); err != nil {
+		fail(c, http.StatusBadGateway, "IMAP 连接失败: "+err.Error())
+		return
+	}
+	defer mc.Disconnect()
+
+	message, err := mc.GetFullInFolder(folder, uid)
+	if err != nil {
+		fail(c, http.StatusBadGateway, "读取邮件详情失败: "+err.Error())
+		return
+	}
+	s.setCachedMessage(accountID, folder, uid, message)
+	ok(c, gin.H{
+		"account_id": accountID,
+		"message":    message,
+		"method":     "imap",
+	})
+}
+
+type messageRef struct {
+	Folder string `json:"folder"`
+	UID    string `json:"uid"`
+}
+
+type messagesReq struct {
+	AccountID string       `json:"account_id" binding:"required"`
+	Messages  []messageRef `json:"messages" binding:"required"`
+}
+
+func (s *Server) getMessages(c *gin.Context) {
+	var req messagesReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "参数错误: account_id, messages 必填 — "+err.Error())
+		return
+	}
+	if len(req.Messages) == 0 {
+		ok(c, gin.H{
+			"account_id": req.AccountID,
+			"messages":   []*mail.FullMessage{},
+			"method":     "cache",
+			"cached":     true,
+		})
+		return
+	}
+	if len(req.Messages) > 50 {
+		fail(c, http.StatusBadRequest, "一次最多预取 50 封邮件")
+		return
+	}
+
+	byFolder := make(map[string][]uint32)
+	seen := make(map[string]bool)
+	out := make([]*mail.FullMessage, 0, len(req.Messages))
+	for _, ref := range req.Messages {
+		folder := strings.TrimSpace(ref.Folder)
+		if folder == "" {
+			folder = "INBOX"
+		}
+		uid64, err := strconv.ParseUint(strings.TrimSpace(ref.UID), 10, 32)
+		if err != nil {
+			fail(c, http.StatusBadRequest, "邮件 UID 必须是数字")
+			return
+		}
+		uid := uint32(uid64)
+		key := messageCacheKey(req.AccountID, folder, uid)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if message, cached := s.cachedMessage(req.AccountID, folder, uid); cached {
+			out = append(out, message)
+			continue
+		}
+		byFolder[folder] = append(byFolder[folder], uid)
+	}
+
+	method := "cache"
+	if len(byFolder) > 0 {
+		method = "imap"
+		mc, err := s.mgr.MailClient(req.AccountID)
+		if err != nil {
+			fail(c, http.StatusBadRequest, "读取邮件详情需要 App Password: "+err.Error())
+			return
+		}
+		if err := mc.Connect(); err != nil {
+			fail(c, http.StatusBadGateway, "IMAP 连接失败: "+err.Error())
+			return
+		}
+		defer mc.Disconnect()
+
+		for folder, uids := range byFolder {
+			messages, err := mc.GetFullBatchInFolder(folder, uids)
+			if err != nil {
+				fail(c, http.StatusBadGateway, "批量读取邮件详情失败: "+err.Error())
+				return
+			}
+			for _, message := range messages {
+				uid64, err := strconv.ParseUint(message.UID, 10, 32)
+				if err == nil {
+					s.setCachedMessage(req.AccountID, folder, uint32(uid64), message)
+				}
+				out = append(out, message)
+			}
+		}
+	}
+	ok(c, gin.H{
+		"account_id": req.AccountID,
+		"count":      len(out),
+		"messages":   out,
+		"method":     method,
+		"cached":     len(byFolder) == 0,
+	})
+}
+
 func (s *Server) listMailboxes(c *gin.Context) {
 	accountID := c.Query("account_id")
 	if accountID == "" {
 		fail(c, http.StatusBadRequest, "参数缺失: account_id")
 		return
+	}
+	if c.Query("refresh") != "1" {
+		if folders, cached := s.cachedMailboxes(accountID); cached {
+			ok(c, gin.H{
+				"account_id": accountID,
+				"folders":    folders,
+				"cached":     true,
+			})
+			return
+		}
 	}
 
 	mc, err := s.mgr.MailClient(accountID)
@@ -369,6 +664,7 @@ func (s *Server) listMailboxes(c *gin.Context) {
 		fail(c, http.StatusBadGateway, "读取文件夹失败: "+err.Error())
 		return
 	}
+	s.setCachedMailboxes(accountID, folders)
 	ok(c, gin.H{
 		"account_id": accountID,
 		"folders":    folders,
@@ -431,6 +727,7 @@ func (s *Server) setAppPassword(c *gin.Context) {
 		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.clearCache()
 	ok(c, gin.H{"id": id, "icloud_email": req.ICloudEmail})
 }
 
@@ -449,6 +746,7 @@ func (s *Server) updateCookies(c *gin.Context) {
 		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.clearCache()
 	ok(c, gin.H{"id": id, "cookies_count": len(req.Cookies)})
 }
 
@@ -483,6 +781,7 @@ func (s *Server) loginAccount(c *gin.Context) {
 		return
 	}
 
+	s.clearCache()
 	ok(c, gin.H{
 		"id":      id,
 		"cookies": client.Cookies,
@@ -494,6 +793,17 @@ func (s *Server) listAliases(c *gin.Context) {
 	if accountID == "" {
 		fail(c, http.StatusBadRequest, "参数缺失: account_id")
 		return
+	}
+	if c.Query("refresh") != "1" {
+		if aliases, cached := s.cachedAliases(accountID); cached {
+			ok(c, gin.H{
+				"account_id": accountID,
+				"count":      len(aliases),
+				"aliases":    aliases,
+				"cached":     true,
+			})
+			return
+		}
 	}
 	client, err := s.mgr.HMEClient(accountID, false)
 	if err != nil {
@@ -510,6 +820,7 @@ func (s *Server) listAliases(c *gin.Context) {
 		}
 		return
 	}
+	s.setCachedAliases(accountID, aliases)
 	ok(c, gin.H{
 		"account_id": accountID,
 		"count":      len(aliases),
@@ -541,6 +852,7 @@ func (s *Server) deactivateAlias(c *gin.Context) {
 		fail(c, http.StatusBadGateway, "停用失败: "+err.Error())
 		return
 	}
+	s.invalidateAliases(req.AccountID)
 	ok(c, gin.H{"anonymous_id": anonymousID, "success": success})
 }
 
@@ -564,6 +876,7 @@ func (s *Server) reactivateAlias(c *gin.Context) {
 		fail(c, http.StatusBadGateway, "激活失败: "+err.Error())
 		return
 	}
+	s.invalidateAliases(req.AccountID)
 	ok(c, gin.H{"anonymous_id": anonymousID, "success": success})
 }
 
@@ -587,6 +900,7 @@ func (s *Server) deleteAlias(c *gin.Context) {
 		return
 	}
 	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
+	s.invalidateAliases(req.AccountID)
 	ok(c, gin.H{"anonymous_id": anonymousID})
 }
 
@@ -605,6 +919,7 @@ func (s *Server) reloadConfig(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "重新加载配置失败: "+err.Error())
 		return
 	}
+	s.clearCache()
 	ok(c, gin.H{"message": "配置已重新加载"})
 }
 
