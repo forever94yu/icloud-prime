@@ -91,7 +91,10 @@ func GetParams(G int) *SRPParams {
 	if params == nil {
 		panic(fmt.Sprintf("Params don't exist for %v", G))
 	} else {
-		return params
+		copy := *params
+		copy.G = new(big.Int).Set(params.G)
+		copy.N = new(big.Int).Set(params.N)
+		return &copy
 	}
 }
 

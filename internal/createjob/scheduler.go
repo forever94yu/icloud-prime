@@ -94,8 +94,7 @@ func (s *Scheduler) BatchCreate(ctx context.Context, req BatchRequest) (*BatchRe
 		return nil, fmt.Errorf("count 必须在 1-%d 之间", hourlyLimit)
 	}
 
-	at := s.now()
-	remaining := s.limiter.Remaining(req.AccountID, at)
+	remaining := s.RemainingThisHour(req.AccountID)
 	toCreate := req.Count
 	if toCreate > remaining {
 		toCreate = remaining
@@ -113,9 +112,10 @@ func (s *Scheduler) BatchCreate(ctx context.Context, req BatchRequest) (*BatchRe
 	}
 
 	for i := 0; i < toCreate; i++ {
+		at := s.now()
 		if !s.limiter.TryReserve(req.AccountID, at, 1) {
 			resp.SkippedCount = req.Count - resp.CreatedCount
-			resp.RemainingThisHour = s.limiter.Remaining(req.AccountID, at)
+			resp.RemainingThisHour = s.RemainingThisHour(req.AccountID)
 			resp.Message = "当前小时创建额度不足"
 			return resp, nil
 		}
@@ -124,7 +124,7 @@ func (s *Scheduler) BatchCreate(ctx context.Context, req BatchRequest) (*BatchRe
 			_ = s.persistState()
 			resp.LastError = err.Error()
 			resp.SkippedCount = req.Count - resp.CreatedCount
-			resp.RemainingThisHour = s.limiter.Remaining(req.AccountID, at)
+			resp.RemainingThisHour = s.RemainingThisHour(req.AccountID)
 			return resp, err
 		}
 		result, err := s.creator.CreateAlias(ctx, req.AccountID, labelFor(req.LabelPrefix, resp.CreatedCount+1))
@@ -133,14 +133,14 @@ func (s *Scheduler) BatchCreate(ctx context.Context, req BatchRequest) (*BatchRe
 			_ = s.persistState()
 			resp.LastError = err.Error()
 			resp.SkippedCount = req.Count - resp.CreatedCount
-			resp.RemainingThisHour = s.limiter.Remaining(req.AccountID, at)
+			resp.RemainingThisHour = s.RemainingThisHour(req.AccountID)
 			return resp, err
 		}
 		resp.Created = append(resp.Created, *result)
 		resp.CreatedCount++
 	}
 	resp.SkippedCount = req.Count - resp.CreatedCount
-	resp.RemainingThisHour = s.limiter.Remaining(req.AccountID, at)
+	resp.RemainingThisHour = s.RemainingThisHour(req.AccountID)
 	if resp.SkippedCount > 0 {
 		resp.Message = fmt.Sprintf("当前小时额度不足，已创建 %d 个", resp.CreatedCount)
 	}
@@ -174,13 +174,12 @@ func (s *Scheduler) UpsertJob(req JobRequest) (*Job, error) {
 	if id == "" {
 		id = "job_" + uuid.New().String()[:8]
 	}
-	job, ok := s.jobs[id]
-	if !ok {
+	job := cloneJob(s.jobs[id])
+	if job == nil {
 		job = &Job{
 			ID:        id,
 			CreatedAt: now,
 		}
-		s.jobs[id] = job
 	}
 	job.AccountID = req.AccountID
 	job.LabelPrefix = req.LabelPrefix
@@ -200,7 +199,7 @@ func (s *Scheduler) UpsertJob(req JobRequest) (*Job, error) {
 	}
 	job.NextRunAt = timePtr(now)
 	job.UpdatedAt = now
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveJobLocked(job); err != nil {
 		return nil, err
 	}
 	return cloneJob(job), nil
@@ -243,6 +242,7 @@ func (s *Scheduler) ResumeJob(id string) (*Job, error) {
 	if !ok {
 		return nil, errors.New("任务不存在")
 	}
+	job = cloneJob(job)
 	now := s.now()
 	job.Status = StatusRunning
 	job.LastError = ""
@@ -252,7 +252,7 @@ func (s *Scheduler) ResumeJob(id string) (*Job, error) {
 		job.EndedAt = timePtr(now.Add(time.Duration(job.DurationHours) * time.Hour))
 	}
 	job.UpdatedAt = now
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveJobLocked(job); err != nil {
 		return nil, err
 	}
 	return cloneJob(job), nil
@@ -261,18 +261,23 @@ func (s *Scheduler) ResumeJob(id string) (*Job, error) {
 func (s *Scheduler) DeleteJob(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.jobs[id]; !ok {
+	job, ok := s.jobs[id]
+	if !ok {
 		return errors.New("任务不存在")
 	}
 	delete(s.jobs, id)
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.jobs[id] = job
+		return err
+	}
+	return nil
 }
 
 func (s *Scheduler) RunDue(ctx context.Context) error {
 	now := s.now()
 	dueJobs := s.snapshotDue(now)
 	for _, job := range dueJobs {
-		s.runJob(ctx, job.ID, now)
+		s.runJob(ctx, job.ID, s.now())
 	}
 	return nil
 }
@@ -315,7 +320,7 @@ func (s *Scheduler) runJob(ctx context.Context, id string, at time.Time) {
 		return
 	}
 	if job.Mode == ModeDailyWindow && !s.isInDailyWindow(at, job.StartTime, job.EndTime) {
-		job.NextRunAt = timePtr(nextHour(at))
+		job.NextRunAt = timePtr(nextDailyWindowStart(at, job.StartTime))
 		job.UpdatedAt = at
 		_ = s.saveLocked()
 		s.mu.Unlock()
@@ -328,13 +333,18 @@ func (s *Scheduler) runJob(ctx context.Context, id string, at time.Time) {
 
 	if !s.limiter.TryReserve(accountID, at, 1) {
 		s.updateJob(id, at, func(job *Job) {
-			job.NextRunAt = timePtr(nextHour(at))
+			if job.Status == StatusRunning {
+				job.NextRunAt = timePtr(nextHour(at))
+			}
 		})
 		return
 	}
 	if err := s.persistState(); err != nil {
 		s.limiter.Release(accountID, at, 1)
 		s.updateJob(id, at, func(job *Job) {
+			if job.Status != StatusRunning {
+				return
+			}
 			job.Status = StatusError
 			job.LastError = "保存额度状态失败: " + err.Error()
 			job.NextRunAt = nil
@@ -346,13 +356,18 @@ func (s *Scheduler) runJob(ctx context.Context, id string, at time.Time) {
 		s.limiter.Release(accountID, at, 1)
 		if isTransientCreateError(err) {
 			s.updateJob(id, at, func(job *Job) {
-				job.Status = StatusRunning
+				if job.Status != StatusRunning {
+					return
+				}
 				job.LastError = err.Error()
 				job.NextRunAt = timePtr(nextHour(at))
 			})
 			return
 		}
 		s.updateJob(id, at, func(job *Job) {
+			if job.Status != StatusRunning {
+				return
+			}
 			job.Status = StatusError
 			job.LastError = err.Error()
 			job.NextRunAt = nil
@@ -363,7 +378,9 @@ func (s *Scheduler) runJob(ctx context.Context, id string, at time.Time) {
 	s.updateJob(id, at, func(job *Job) {
 		job.CreatedCount++
 		job.LastError = ""
-		job.NextRunAt = timePtr(s.nextAutomaticRun(at, job.AccountID))
+		if job.Status == StatusRunning {
+			job.NextRunAt = timePtr(s.nextAutomaticRun(at, job.AccountID))
+		}
 	})
 }
 
@@ -407,12 +424,28 @@ func (s *Scheduler) setStatus(id, status string) (*Job, error) {
 	if !ok {
 		return nil, errors.New("任务不存在")
 	}
+	job = cloneJob(job)
 	job.Status = status
 	job.UpdatedAt = s.now()
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveJobLocked(job); err != nil {
 		return nil, err
 	}
 	return cloneJob(job), nil
+}
+
+// The caller supplies a copy so a failed save can restore the previous live job.
+func (s *Scheduler) saveJobLocked(job *Job) error {
+	previous, existed := s.jobs[job.ID]
+	s.jobs[job.ID] = job
+	if err := s.saveLocked(); err != nil {
+		if existed {
+			s.jobs[job.ID] = previous
+		} else {
+			delete(s.jobs, job.ID)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Scheduler) saveLocked() error {
@@ -536,6 +569,20 @@ func labelFor(prefix string, index int) string {
 
 func nextHour(at time.Time) time.Time {
 	return at.Local().Truncate(time.Hour).Add(time.Hour)
+}
+
+func nextDailyWindowStart(at time.Time, start string) time.Time {
+	clock, ok := parseClock(start)
+	if !ok {
+		return nextHour(at)
+	}
+	hour := int(clock / time.Hour)
+	minute := int(clock % time.Hour / time.Minute)
+	next := time.Date(at.Year(), at.Month(), at.Day(), hour, minute, 0, 0, at.Location())
+	if !next.After(at) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }
 
 func cloneJob(job *Job) *Job {

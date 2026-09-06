@@ -32,6 +32,9 @@ jobs:
         working-directory: web
         run: |
           npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
 
       - uses: actions/setup-go@v5
@@ -42,6 +45,8 @@ jobs:
       - name: Build Windows binary
         shell: pwsh
         run: |
+          go test ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -ldflags="-s -w" -o icloud-prime.exe .
 
       - name: Package portable zip
@@ -58,4 +63,5 @@ jobs:
           name: iCloud Prime ${{ github.event.inputs.tag || github.ref_name }}
           draft: false
           prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
+          body_path: build/release/${{ github.event.inputs.tag || github.ref_name }}-notes.md
           files: build/release/*.zip

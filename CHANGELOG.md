@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.9 - 2026-09-06
+
+- Preserve account credentials when redacting API responses, isolate Cookie snapshots across requests, and roll back account changes when persistence fails.
+- Listen on localhost by default. Remote listeners now require an API token; local API calls also validate the peer, Host, and browser Origin.
+- Restore account creation, Cookie updates, App Password setup, and password login in the web console, with credential status and API token settings.
+- Prevent stale account and inbox requests from mixing accounts, and invalidate cached account data after deletion.
+- Correct SRP challenge forwarding and reject invalid authentication responses without panicking.
+- Fix daily schedule boundaries, cross-hour quota accounting, pause races, and task persistence rollback.
+- Return already-created aliases when a batch partially fails instead of hiding successful creations.
+- Fix Web mail recipient searches and China-region gateway Cookies, preserve IMAP errors and partial results, and exclude MIME attachments from message bodies.
+- Return actual unread state, match Hide My Email filters against known aliases, and load message bodies in batches beyond the first 50 messages.
+- Reject upstream alias-list business errors instead of caching them as empty lists.
+- Add regression tests for all reviewed failure scenarios and require tests before publishing release packages.
+
 ## v0.1.8 - 2026-08-27
 
 - Import edited `data/accounts.example.json` on first startup when `data/accounts.json` does not exist.

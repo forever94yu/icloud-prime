@@ -11,6 +11,7 @@ package server
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -34,6 +35,7 @@ type Server struct {
 	cacheTTL   time.Duration
 	folderTTL  time.Duration
 	messageTTL time.Duration
+	apiToken   string
 }
 
 type responseCache struct {
@@ -93,6 +95,7 @@ func NewWithScheduler(mgr *account.Manager, scheduler *createjob.Scheduler, debu
 		messageTTL: 10 * time.Minute,
 	}
 	s.r = gin.Default() // 自带 Logger + Recovery 中间件
+	_ = s.r.SetTrustedProxies(nil)
 	s.register()
 	s.registerStatic()
 	return s
@@ -100,14 +103,21 @@ func NewWithScheduler(mgr *account.Manager, scheduler *createjob.Scheduler, debu
 
 // Run 启动 HTTP 服务。
 func (s *Server) Run(addr string) error {
+	if err := validateListenAddress(addr, s.apiToken); err != nil {
+		return err
+	}
 	return s.r.Run(addr)
+}
+
+func (s *Server) SetAPIToken(token string) {
+	s.apiToken = strings.TrimSpace(token)
 }
 
 // Handler 返回底层 gin 引擎(便于测试)。
 func (s *Server) Handler() http.Handler { return s.r }
 
 func (s *Server) register() {
-	api := s.r.Group("/api")
+	api := s.r.Group("/api", s.authorizeAPI)
 	{
 		// ===== 账号管理 =====
 		api.GET("/accounts", s.listAccounts)
@@ -229,6 +239,18 @@ func (s *Server) clearCache() {
 	s.cache.messages = make(map[string]messageCacheEntry)
 }
 
+func (s *Server) invalidateAccount(accountID string) {
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	delete(s.cache.aliases, accountID)
+	delete(s.cache.mailboxes, accountID)
+	for key := range s.cache.messages {
+		if strings.HasPrefix(key, accountID+"|") {
+			delete(s.cache.messages, key)
+		}
+	}
+}
+
 // ---- 统一响应 ----
 
 type apiResp struct {
@@ -255,8 +277,9 @@ func (h hmeAliasCreator) CreateAlias(ctx context.Context, accountID, label strin
 	if err != nil {
 		return nil, err
 	}
+	before := maps.Clone(client.Cookies)
 	result, err := client.CreateAlias(label, 5)
-	_ = h.mgr.SaveCookies(accountID, client.Cookies)
+	_ = h.mgr.SaveCookiesIfUnchanged(accountID, before, client.Cookies)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +340,14 @@ func (s *Server) createAliasBatch(c *gin.Context) {
 		return
 	}
 	resp, err := s.scheduler.BatchCreate(c.Request.Context(), req)
+	if resp != nil && resp.CreatedCount > 0 {
+		s.invalidateAliases(req.AccountID)
+	}
 	if err != nil {
+		if resp != nil && resp.CreatedCount > 0 {
+			ok(c, resp)
+			return
+		}
 		msg := err.Error()
 		if strings.Contains(msg, "count") || strings.Contains(msg, "account_id") {
 			fail(c, http.StatusBadRequest, msg)
@@ -327,9 +357,6 @@ func (s *Server) createAliasBatch(c *gin.Context) {
 			fail(c, http.StatusBadGateway, "批量创建失败: "+msg)
 		}
 		return
-	}
-	if resp.CreatedCount > 0 {
-		s.invalidateAliases(req.AccountID)
 	}
 	ok(c, resp)
 }
@@ -395,7 +422,7 @@ func (s *Server) deleteCreateJob(c *gin.Context) {
 //
 //   认证优先级: IMAP (App Password) 优先 > Web API (Cookie) 回退
 //   - IMAP: 支持服务端按收件人搜索 (FindByRecipient)
-//   - Web API: 不支持收件人搜索,拉取收件箱后本地按别名过滤 (FindByAlias)
+//   - Web API: 支持按收件人搜索 (FindByAlias)
 // ====================================================================
 
 func (s *Server) listInbox(c *gin.Context) {
@@ -427,15 +454,19 @@ func (s *Server) listInbox(c *gin.Context) {
 			} else {
 				messages, err = mc.ListFolder(folder, limit, days)
 			}
-			if err == nil {
-				ok(c, gin.H{
+			if err == nil || len(messages) > 0 {
+				data := gin.H{
 					"account_id": accountID,
 					"alias":      alias,
 					"folder":     folder,
 					"count":      len(messages),
 					"messages":   messages,
 					"method":     "imap",
-				})
+				}
+				if err != nil {
+					data["warning"] = err.Error()
+				}
+				ok(c, data)
 				return
 			}
 			// IMAP 失败，继续尝试 Web API
@@ -448,10 +479,14 @@ func (s *Server) listInbox(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "无可用邮件客户端: 需要 App Password 或 Cookie")
 		return
 	}
-	if folder != "" && folder != "inbox" && folder != "all" {
+	if folder != "" && !strings.EqualFold(folder, "inbox") && !strings.EqualFold(folder, "all") {
 		fail(c, http.StatusBadRequest, "Web API 回退暂不支持读取该文件夹: "+folder)
 		return
 	}
+	before := wmc.CookiesSnapshot()
+	defer func() {
+		_ = s.mgr.SaveCookiesIfUnchanged(accountID, before, wmc.CookiesSnapshot())
+	}()
 
 	if alias != "" {
 		messages, err := wmc.FindByAlias(alias, limit)
@@ -487,6 +522,10 @@ func (s *Server) getMessage(c *gin.Context) {
 	accountID := c.Query("account_id")
 	if accountID == "" {
 		fail(c, http.StatusBadRequest, "参数缺失: account_id")
+		return
+	}
+	if _, exists := s.mgr.GetAccount(accountID); !exists {
+		fail(c, http.StatusNotFound, "账号不存在")
 		return
 	}
 	folder := strings.TrimSpace(c.DefaultQuery("folder", "INBOX"))
@@ -551,6 +590,10 @@ func (s *Server) getMessages(c *gin.Context) {
 	var req messagesReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, http.StatusBadRequest, "参数错误: account_id, messages 必填 — "+err.Error())
+		return
+	}
+	if _, exists := s.mgr.GetAccount(req.AccountID); !exists {
+		fail(c, http.StatusNotFound, "账号不存在")
 		return
 	}
 	if len(req.Messages) == 0 {
@@ -637,6 +680,10 @@ func (s *Server) listMailboxes(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "参数缺失: account_id")
 		return
 	}
+	if _, exists := s.mgr.GetAccount(accountID); !exists {
+		fail(c, http.StatusNotFound, "账号不存在")
+		return
+	}
 	if c.Query("refresh") != "1" {
 		if folders, cached := s.cachedMailboxes(accountID); cached {
 			ok(c, gin.H{
@@ -680,10 +727,11 @@ func (s *Server) listAccounts(c *gin.Context) {
 }
 
 type addAccountReq struct {
-	Name    string `json:"name" binding:"required"`
-	Cookies string `json:"cookies"` // 可选,后续可通过 /login 获取
-	Host    string `json:"host"`
-	Proxy   string `json:"proxy"` // HTTP/SOCKS5 代理
+	Name      string `json:"name" binding:"required"`
+	Cookies   string `json:"cookies"` // 可选,后续可通过 /login 获取
+	Host      string `json:"host"`
+	Proxy     string `json:"proxy"` // HTTP/SOCKS5 代理
+	RealEmail string `json:"real_email"`
 }
 
 func (s *Server) addAccount(c *gin.Context) {
@@ -692,21 +740,31 @@ func (s *Server) addAccount(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "参数错误: name 必填 — "+err.Error())
 		return
 	}
-	acc, err := s.mgr.AddAccount(req.Name, req.Cookies, req.Host, req.Proxy)
+	acc, err := s.mgr.AddAccount(req.Name, req.Cookies, req.Host, req.Proxy, req.RealEmail)
 	if err != nil {
 		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	// 返回时脱敏
-	acc.Cookies = nil
-	c.JSON(http.StatusCreated, apiResp{Success: true, Data: acc})
+	c.JSON(http.StatusCreated, apiResp{Success: true, Data: acc.Public()})
 }
 
 func (s *Server) removeAccount(c *gin.Context) {
 	id := c.Param("id")
-	if !s.mgr.RemoveAccount(id) {
+	removed, err := s.mgr.RemoveAccount(id)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, "保存账号配置失败: "+err.Error())
+		return
+	}
+	if !removed {
 		fail(c, http.StatusNotFound, "账号不存在")
 		return
+	}
+	s.invalidateAccount(id)
+	for _, job := range s.scheduler.ListJobs(id) {
+		if job.Status == createjob.StatusRunning {
+			_, _ = s.scheduler.PauseJob(job.ID)
+		}
 	}
 	ok(c, gin.H{"id": id})
 }
@@ -747,7 +805,15 @@ func (s *Server) updateCookies(c *gin.Context) {
 		return
 	}
 	s.clearCache()
-	ok(c, gin.H{"id": id, "cookies_count": len(req.Cookies)})
+	acc, _ := s.mgr.GetAccount(id)
+	data := gin.H{"id": id, "cookies_count": len(req.Cookies)}
+	if acc != nil {
+		data["account"] = acc.Public()
+		if acc.LastError != "" {
+			data["warning"] = acc.LastError
+		}
+	}
+	ok(c, data)
 }
 
 type loginReq struct {
@@ -771,7 +837,7 @@ func (s *Server) loginAccount(c *gin.Context) {
 		}
 	}
 
-	client, err := s.mgr.HMEClientWithPassword(id, req.Password, otpProvider)
+	_, err := s.mgr.HMEClientWithPassword(id, req.Password, otpProvider)
 	if err != nil {
 		if isSessionError(err.Error()) {
 			fail(c, http.StatusUnauthorized, err.Error())
@@ -783,8 +849,7 @@ func (s *Server) loginAccount(c *gin.Context) {
 
 	s.clearCache()
 	ok(c, gin.H{
-		"id":      id,
-		"cookies": client.Cookies,
+		"id": id,
 	})
 }
 
@@ -792,6 +857,10 @@ func (s *Server) listAliases(c *gin.Context) {
 	accountID := c.Query("account_id")
 	if accountID == "" {
 		fail(c, http.StatusBadRequest, "参数缺失: account_id")
+		return
+	}
+	if _, exists := s.mgr.GetAccount(accountID); !exists {
+		fail(c, http.StatusNotFound, "账号不存在")
 		return
 	}
 	if c.Query("refresh") != "1" {
@@ -810,8 +879,9 @@ func (s *Server) listAliases(c *gin.Context) {
 		fail(c, http.StatusNotFound, err.Error())
 		return
 	}
+	before := maps.Clone(client.Cookies)
 	aliases, err := client.ListAliases()
-	_ = s.mgr.SaveCookies(accountID, client.Cookies)
+	_ = s.mgr.SaveCookiesIfUnchanged(accountID, before, client.Cookies)
 	if err != nil {
 		if isSessionError(err.Error()) {
 			fail(c, http.StatusUnauthorized, "iCloud 会话失效,请更新 Cookie: "+err.Error())
@@ -846,10 +916,15 @@ func (s *Server) deactivateAlias(c *gin.Context) {
 		return
 	}
 
+	before := maps.Clone(client.Cookies)
 	success, err := client.DeactivateHME(anonymousID)
-	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
+	_ = s.mgr.SaveCookiesIfUnchanged(req.AccountID, before, client.Cookies)
 	if err != nil {
 		fail(c, http.StatusBadGateway, "停用失败: "+err.Error())
+		return
+	}
+	if !success {
+		fail(c, http.StatusBadGateway, "iCloud 未能停用该别名")
 		return
 	}
 	s.invalidateAliases(req.AccountID)
@@ -870,10 +945,15 @@ func (s *Server) reactivateAlias(c *gin.Context) {
 		return
 	}
 
+	before := maps.Clone(client.Cookies)
 	success, err := client.ReactivateHME(anonymousID)
-	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
+	_ = s.mgr.SaveCookiesIfUnchanged(req.AccountID, before, client.Cookies)
 	if err != nil {
 		fail(c, http.StatusBadGateway, "激活失败: "+err.Error())
+		return
+	}
+	if !success {
+		fail(c, http.StatusBadGateway, "iCloud 未能启用该别名")
 		return
 	}
 	s.invalidateAliases(req.AccountID)
@@ -894,12 +974,13 @@ func (s *Server) deleteAlias(c *gin.Context) {
 		return
 	}
 
+	before := maps.Clone(client.Cookies)
 	if err := client.Delete(anonymousID); err != nil {
-		_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
+		_ = s.mgr.SaveCookiesIfUnchanged(req.AccountID, before, client.Cookies)
 		fail(c, http.StatusBadGateway, "删除失败: "+err.Error())
 		return
 	}
-	_ = s.mgr.SaveCookies(req.AccountID, client.Cookies)
+	_ = s.mgr.SaveCookiesIfUnchanged(req.AccountID, before, client.Cookies)
 	s.invalidateAliases(req.AccountID)
 	ok(c, gin.H{"anonymous_id": anonymousID})
 }

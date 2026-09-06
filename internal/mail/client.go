@@ -7,6 +7,7 @@ package mail
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	stdhtml "html"
 	"io"
@@ -39,6 +40,7 @@ type Message struct {
 	Subject string `json:"subject"`
 	Date    string `json:"date"`
 	Preview string `json:"preview"`
+	Unread  *bool  `json:"unread,omitempty"`
 	match   string
 }
 
@@ -75,6 +77,7 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("IMAP 连接失败: %w", err)
 	}
 	if err := cli.Login(c.appleID, c.appPassword); err != nil {
+		_ = cli.Terminate()
 		return fmt.Errorf("IMAP 登录失败 — 请检查: 1) 应用专用密码是否正确 2) Apple ID: %s — %w", c.appleID, err)
 	}
 	c.cli = cli
@@ -170,9 +173,11 @@ func (c *Client) listFolder(folder string, limit int, days int, includeBody bool
 	}
 
 	var all []Message
+	var folderErrors []error
 	for _, name := range folders {
 		messages, err := c.listMailbox(name, limit, days, includeBody)
 		if err != nil {
+			folderErrors = append(folderErrors, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
 		all = append(all, messages...)
@@ -181,7 +186,7 @@ func (c *Client) listFolder(folder string, limit int, days int, includeBody bool
 	if len(all) > limit {
 		all = all[:limit]
 	}
-	return all, nil
+	return all, errors.Join(folderErrors...)
 }
 
 func (c *Client) listMailbox(folder string, limit int, days int, includeBody bool) ([]Message, error) {
@@ -207,6 +212,7 @@ func (c *Client) listMailbox(folder string, limit int, days int, includeBody boo
 		imap.FetchUid,
 		imap.FetchEnvelope,
 		imap.FetchInternalDate,
+		imap.FetchFlags,
 	}
 	parser := toMessageSummary
 	if includeBody {
@@ -268,10 +274,12 @@ func (c *Client) findByRecipientInFolder(recipient string, folder string, limit 
 	}
 
 	var out []Message
+	var folderErrors []error
 	seen := map[string]bool{}
 	for _, name := range folders {
 		messages, err := c.findByRecipientInMailbox(recipient, name, limit, days, includeBody)
 		if err != nil {
+			folderErrors = append(folderErrors, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
 		for _, m := range messages {
@@ -287,7 +295,7 @@ func (c *Client) findByRecipientInFolder(recipient string, folder string, limit 
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	return out, nil
+	return out, errors.Join(folderErrors...)
 }
 
 func (c *Client) findByRecipientInMailbox(recipient string, folder string, limit int, days int, includeBody bool) ([]Message, error) {
@@ -349,7 +357,7 @@ func (c *Client) fetchByUIDs(uids []uint32, folder string, limit int, includeBod
 		seqset.AddNum(uid)
 	}
 
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate}
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, imap.FetchFlags}
 	parser := toMessageSummary
 	if includeBody {
 		section := &imap.BodySectionName{Peek: true}
@@ -411,7 +419,7 @@ func (c *Client) GetFullBatchInFolder(folder string, uids []uint32) ([]*FullMess
 	}
 
 	section := &imap.BodySectionName{Peek: true}
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, section.FetchItem()}
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchEnvelope, imap.FetchInternalDate, imap.FetchFlags, section.FetchItem()}
 	messages := make(chan *imap.Message, len(uids))
 	done := make(chan error, 1)
 	go func() {
@@ -447,6 +455,13 @@ func (c *Client) GetFullBatchInFolder(folder string, uids []uint32) ([]*FullMess
 
 func toMessage(msg *imap.Message, folder string) Message {
 	m := Message{}
+	if msg == nil {
+		return m
+	}
+	if _, fetched := msg.Items[imap.FetchFlags]; fetched || msg.Flags != nil {
+		unread := !hasAttr(msg.Flags, imap.SeenFlag)
+		m.Unread = &unread
+	}
 	if msg.Uid > 0 {
 		m.UID = fmt.Sprintf("%d", msg.Uid)
 		if folder != "" {
@@ -477,6 +492,9 @@ func toMessage(msg *imap.Message, folder string) Message {
 	}
 	if m.To != "" {
 		m.To = decodeHeader(m.To)
+	}
+	if m.Date == "" && !msg.InternalDate.IsZero() {
+		m.Date = msg.InternalDate.Format(time.RFC3339)
 	}
 	return m
 }
@@ -744,8 +762,17 @@ func readMultipartBody(body io.Reader, boundary string) (string, error) {
 			return "", err
 		}
 
+		disposition, _, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+		if strings.EqualFold(disposition, "attachment") {
+			part.Close()
+			continue
+		}
 		partType, _, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
 		partType = strings.ToLower(partType)
+		if partType != "" && !strings.HasPrefix(partType, "text/") && !strings.HasPrefix(partType, "multipart/") {
+			part.Close()
+			continue
+		}
 		text, err := readMIMEBody(mail.Header(part.Header), part)
 		if err != nil {
 			continue

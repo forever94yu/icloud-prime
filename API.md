@@ -26,6 +26,20 @@ Errors use:
 
 Do not send real Cookie values or App-specific passwords in public bug reports.
 
+## Access Control
+
+The default listener is `127.0.0.1:8081`. Without an API token, requests must
+originate from a loopback peer and use a loopback Host; browser Origins must also
+be local. Remote listeners require `ICLOUD_PRIME_API_TOKEN` or `-api-token`.
+When configured, every API request, including local requests, must include:
+
+```http
+Authorization: Bearer YOUR_API_TOKEN
+```
+
+Missing or incorrect tokens return `401`. Disallowed local-only access returns
+`403`. Static web files remain accessible so users can enter the token in Settings.
+
 ## Accounts
 
 ### List Accounts
@@ -35,6 +49,8 @@ GET /api/accounts
 ```
 
 Sensitive fields are redacted from the response.
+`has_cookies` and `has_app_password` indicate which credentials are configured.
+Cookie values, App Passwords, and proxy credentials are not returned.
 
 On startup, if `data/accounts.json` is missing, the app can import an edited
 `data/accounts.example.json` that contains real non-placeholder account values.
@@ -65,6 +81,7 @@ Fields:
 - `host`: optional, usually `icloud.com` or `icloud.com.cn`.
 - `cookies`: optional Cookie input as header string or JSON object string.
 - `proxy`: optional HTTP/SOCKS5 proxy URL.
+- `real_email`: optional Apple ID for password login when adding without Cookies.
 
 ### Delete Account
 
@@ -216,6 +233,11 @@ Response:
 
 If the remaining hourly quota is lower than `count`, the API creates what it can
 and reports the skipped count.
+
+If a later create fails after at least one alias was created, the API returns
+`200` with the partial `created` list, counts, and `last_error`. Clients should
+retain those successful results. A failure before any successful creation
+returns an error status.
 
 ### List Automatic Create Jobs
 
@@ -384,6 +406,9 @@ Read order:
 2. Web API through Cookie fallback.
 
 Response includes `method` with `imap` or `web_api`.
+Messages include `unread` when the server provides a known read state. Missing
+`unread` means unknown, not unread. Partial IMAP folder results include a
+`warning`; failure of every folder triggers Web API fallback.
 
 ### Read One Full Message
 

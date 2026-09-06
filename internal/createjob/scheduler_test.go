@@ -3,7 +3,9 @@ package createjob
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -13,6 +15,12 @@ type fakeCreator struct {
 	created int
 	fail    error
 	labels  []string
+}
+
+type creatorFunc func(context.Context, string, string) (*CreateResult, error)
+
+func (f creatorFunc) CreateAlias(ctx context.Context, accountID, label string) (*CreateResult, error) {
+	return f(ctx, accountID, label)
 }
 
 func (f *fakeCreator) CreateAlias(ctx context.Context, accountID, label string) (*CreateResult, error) {
@@ -130,6 +138,61 @@ func TestHourlyQuotaPersistsAcrossSchedulerRestart(t *testing.T) {
 	}
 }
 
+func TestBatchCreateAccountsForEachRequestInItsCurrentHour(t *testing.T) {
+	now := time.Date(2026, 9, 6, 10, 59, 59, 0, time.Local)
+	calls := 0
+	creator := creatorFunc(func(context.Context, string, string) (*CreateResult, error) {
+		calls++
+		if calls == 1 {
+			now = now.Add(time.Second)
+		}
+		return &CreateResult{}, nil
+	})
+	s := newTestScheduler(t, creator, now)
+	s.now = func() time.Time { return now }
+
+	resp, err := s.BatchCreate(context.Background(), BatchRequest{AccountID: "acc_1", Count: 5})
+	if err != nil {
+		t.Fatalf("batch failed: %v", err)
+	}
+	if resp.CreatedCount != 5 || resp.RemainingThisHour != 1 {
+		t.Fatalf("expected four new-hour requests to leave one quota, got %+v", resp)
+	}
+	restarted, err := NewScheduler(Config{StorePath: s.store.path, Creator: creator, Now: s.now})
+	if err != nil {
+		t.Fatalf("restart failed: %v", err)
+	}
+	if got := restarted.RemainingThisHour("acc_1"); got != 1 {
+		t.Fatalf("expected one persisted quota, got %d", got)
+	}
+	resp, err = restarted.BatchCreate(context.Background(), BatchRequest{AccountID: "acc_1", Count: 5})
+	if err != nil {
+		t.Fatalf("second batch failed: %v", err)
+	}
+	if resp.CreatedCount != 1 || resp.SkippedCount != 4 || calls != 6 {
+		t.Fatalf("expected only one additional create, got %+v and %d calls", resp, calls)
+	}
+}
+
+func TestBatchCreateReleasesFailedReservationAcrossHourBoundary(t *testing.T) {
+	now := time.Date(2026, 9, 6, 10, 59, 59, 0, time.Local)
+	calls := 0
+	s := newTestScheduler(t, creatorFunc(func(context.Context, string, string) (*CreateResult, error) {
+		calls++
+		if calls == 1 {
+			now = now.Add(time.Second)
+			return &CreateResult{}, nil
+		}
+		return nil, errors.New("HTTP 503")
+	}), now)
+	s.now = func() time.Time { return now }
+
+	resp, err := s.BatchCreate(context.Background(), BatchRequest{AccountID: "acc_1", Count: 5})
+	if err == nil || resp.CreatedCount != 1 || resp.SkippedCount != 4 || resp.RemainingThisHour != 5 {
+		t.Fatalf("expected partial result and released current-hour quota, got %+v, %v", resp, err)
+	}
+}
+
 func TestDurationJobCompletesAfterEndTime(t *testing.T) {
 	now := time.Date(2026, 8, 9, 10, 0, 0, 0, time.Local)
 	creator := &fakeCreator{}
@@ -162,6 +225,229 @@ func TestDailyWindowAllowsCrossMidnight(t *testing.T) {
 	}
 	if s.isInDailyWindow(time.Date(2026, 8, 9, 15, 0, 0, 0, time.Local), "22:00", "02:00") {
 		t.Fatal("expected 15:00 outside cross-midnight window")
+	}
+}
+
+func TestDailyWindowSchedulesNonHourlyStart(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start string
+		end   string
+		at    time.Time
+		next  time.Time
+	}{
+		{
+			name:  "short window",
+			start: "09:15", end: "09:45",
+			at:   time.Date(2026, 9, 6, 8, 0, 0, 0, time.Local),
+			next: time.Date(2026, 9, 6, 9, 15, 0, 0, time.Local),
+		},
+		{
+			name:  "next day",
+			start: "09:15", end: "09:45",
+			at:   time.Date(2026, 9, 6, 9, 45, 0, 0, time.Local),
+			next: time.Date(2026, 9, 7, 9, 15, 0, 0, time.Local),
+		},
+		{
+			name:  "cross midnight",
+			start: "22:15", end: "02:45",
+			at:   time.Date(2026, 9, 6, 12, 0, 0, 0, time.Local),
+			next: time.Date(2026, 9, 6, 22, 15, 0, 0, time.Local),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := tc.at
+			creator := &fakeCreator{}
+			s := newTestScheduler(t, creator, now)
+			s.now = func() time.Time { return now }
+			job, err := s.UpsertJob(JobRequest{AccountID: "acc_1", Mode: ModeDailyWindow, StartTime: tc.start, EndTime: tc.end})
+			if err != nil {
+				t.Fatalf("upsert failed: %v", err)
+			}
+			if err := s.RunDue(context.Background()); err != nil {
+				t.Fatalf("initial run failed: %v", err)
+			}
+			updated, _ := s.GetJob(job.ID)
+			if updated.NextRunAt == nil || !updated.NextRunAt.Equal(tc.next) || creator.created != 0 {
+				t.Fatalf("expected next run at %v, got %+v", tc.next, updated)
+			}
+			now = tc.next.Add(-time.Minute)
+			if err := s.RunDue(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if creator.created != 0 {
+				t.Fatal("created an alias before the window opened")
+			}
+			now = tc.next
+			if err := s.RunDue(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if creator.created != 1 {
+				t.Fatalf("expected one create at window start, got %d", creator.created)
+			}
+		})
+	}
+}
+
+func TestRunDueRechecksWindowAfterPreviousRequestCompletes(t *testing.T) {
+	now := time.Date(2026, 9, 6, 10, 59, 59, 0, time.Local)
+	calls := 0
+	s := newTestScheduler(t, creatorFunc(func(context.Context, string, string) (*CreateResult, error) {
+		calls++
+		now = now.Add(time.Second)
+		return &CreateResult{}, nil
+	}), now)
+	s.now = func() time.Time { return now }
+	for i := 0; i < 2; i++ {
+		if _, err := s.UpsertJob(JobRequest{AccountID: "acc_1", Mode: ModeDailyWindow, StartTime: "10:00", EndTime: "11:00"}); err != nil {
+			t.Fatalf("upsert failed: %v", err)
+		}
+	}
+	if err := s.RunDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected the second job to wait until the next window, got %d creates", calls)
+	}
+}
+
+func TestPauseSurvivesInFlightCreationResult(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "transient error", err: errors.New("HTTP 429")},
+		{name: "permanent error", err: errors.New("HTTP 401")},
+		{name: "success"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 9, 6, 10, 0, 0, 0, time.Local)
+			started := make(chan struct{})
+			release := make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			creator := creatorFunc(func(ctx context.Context, _, _ string) (*CreateResult, error) {
+				close(started)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-release:
+					return &CreateResult{}, tc.err
+				}
+			})
+			s := newTestScheduler(t, creator, now)
+			job, err := s.UpsertJob(JobRequest{AccountID: "acc_1", Mode: ModeDuration, DurationHours: 12})
+			if err != nil {
+				t.Fatalf("upsert failed: %v", err)
+			}
+			done := make(chan struct{})
+			go func() {
+				_ = s.RunDue(ctx)
+				close(done)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				<-done
+			})
+			select {
+			case <-started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("scheduled create did not start")
+			}
+			paused, err := s.PauseJob(job.ID)
+			if err != nil {
+				t.Fatalf("pause failed: %v", err)
+			}
+			close(release)
+			<-done
+			updated, _ := s.GetJob(job.ID)
+			if updated.Status != StatusPaused || !reflect.DeepEqual(updated.NextRunAt, paused.NextRunAt) {
+				t.Fatalf("creation result changed the paused schedule: %+v", updated)
+			}
+			wantCount, wantQuota := 0, 5
+			if tc.err == nil {
+				wantCount, wantQuota = 1, 4
+			}
+			if updated.CreatedCount != wantCount || s.RemainingThisHour("acc_1") != wantQuota {
+				t.Fatalf("unexpected count or quota after paused creation: %+v", updated)
+			}
+			state, err := s.store.LoadState()
+			if err != nil || len(state.Jobs) != 1 || state.Jobs[0].Status != StatusPaused {
+				t.Fatalf("pause was not persisted: %+v, %v", state, err)
+			}
+		})
+	}
+}
+
+func TestJobMutationsRollBackAfterStoreFailure(t *testing.T) {
+	for _, operation := range []string{"create", "update", "pause", "resume", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			now := time.Date(2026, 9, 6, 10, 0, 0, 0, time.Local)
+			creator := &fakeCreator{}
+			s := newTestScheduler(t, creator, now)
+			s.now = func() time.Time { return now }
+			req := JobRequest{AccountID: "acc_1", LabelPrefix: "original", Mode: ModeDuration, DurationHours: 3}
+			var before *Job
+			if operation != "create" {
+				var err error
+				before, err = s.UpsertJob(req)
+				if err != nil {
+					t.Fatalf("setup failed: %v", err)
+				}
+				req.ID = before.ID
+				if operation == "resume" {
+					before, err = s.PauseJob(before.ID)
+					if err != nil {
+						t.Fatalf("setup pause failed: %v", err)
+					}
+				}
+			}
+			now = now.Add(10 * time.Minute)
+			if err := os.Mkdir(s.store.path+".tmp", 0700); err != nil {
+				t.Fatalf("block store: %v", err)
+			}
+			var err error
+			switch operation {
+			case "create", "update":
+				req.LabelPrefix = "changed"
+				req.DurationHours = 8
+				_, err = s.UpsertJob(req)
+			case "pause":
+				_, err = s.PauseJob(req.ID)
+			case "resume":
+				_, err = s.ResumeJob(req.ID)
+			case "delete":
+				err = s.DeleteJob(req.ID)
+			}
+			if err == nil {
+				t.Fatal("expected persistence failure")
+			}
+			jobs := s.ListJobs("")
+			if before == nil {
+				if len(jobs) != 0 {
+					t.Fatalf("failed create left live jobs: %+v", jobs)
+				}
+			} else if len(jobs) != 1 || !reflect.DeepEqual(before, jobs[0]) {
+				t.Fatalf("failed %s changed live state: before=%+v, after=%+v", operation, before, jobs)
+			}
+			state, err := s.store.LoadState()
+			if err != nil || !reflect.DeepEqual(state.Jobs, jobs) {
+				t.Fatalf("memory and disk differ after %s failure: %+v, %v", operation, state, err)
+			}
+			if err := os.Remove(s.store.path + ".tmp"); err != nil {
+				t.Fatalf("unblock store: %v", err)
+			}
+			if err := s.RunDue(context.Background()); err != nil {
+				t.Fatalf("run due failed: %v", err)
+			}
+			wantCreates := 1
+			if operation == "create" || operation == "resume" {
+				wantCreates = 0
+			}
+			if creator.created != wantCreates {
+				t.Fatalf("failed %s changed scheduling: created %d, want %d", operation, creator.created, wantCreates)
+			}
+		})
 	}
 }
 
@@ -280,7 +566,7 @@ func TestSchedulerStartRunsDueJobs(t *testing.T) {
 
 	s.Start(ctx, 10*time.Millisecond)
 	deadline := time.After(500 * time.Millisecond)
-	for creator.created == 0 {
+	for s.ListJobs("")[0].CreatedCount == 0 {
 		select {
 		case <-deadline:
 			t.Fatal("expected background scheduler to create an alias")

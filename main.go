@@ -7,8 +7,8 @@
 //
 // 用法:
 //
-//	./icloud-hme                    # 默认 :8081
-//	./icloud-hme -addr :9000        # 指定端口
+//	./icloud-hme                          # 默认 127.0.0.1:8081
+//	./icloud-hme -addr 127.0.0.1:9000       # 指定端口
 //	./icloud-hme -data ./data       # 指定数据目录
 //	./icloud-hme -debug             # 调试模式
 //	./icloud-hme -log-level debug   # 日志级别 (debug/info/warn/error)
@@ -17,6 +17,7 @@ package main
 import (
 	"flag"
 	"log"
+	"os"
 	"path/filepath"
 
 	"icloud-hme/internal/account"
@@ -24,7 +25,8 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":8081", "HTTP 监听地址")
+	addr := flag.String("addr", "127.0.0.1:8081", "HTTP 监听地址")
+	apiToken := flag.String("api-token", os.Getenv("ICLOUD_PRIME_API_TOKEN"), "API 访问令牌 (远程监听时必填)")
 	dataDir := flag.String("data", "./data", "数据目录 (accounts.json 存放位置)")
 	debug := flag.Bool("debug", false, "调试模式 (启用 Gin 调试日志)")
 	flag.Parse()
@@ -44,6 +46,7 @@ func main() {
 	log.Printf("账号加载完成 count=%d data_dir=%s", count, abs)
 
 	srv := server.New(mgr, *debug, abs)
+	srv.SetAPIToken(*apiToken)
 
 	log.Printf("HTTP 服务就绪 addr=%s", *addr)
 	if err := srv.Run(*addr); err != nil {

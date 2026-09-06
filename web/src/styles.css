@@ -52,6 +52,10 @@ select {
   font: inherit;
 }
 
+textarea {
+  font: inherit;
+}
+
 button {
   cursor: pointer;
 }
@@ -454,6 +458,83 @@ h1 {
 .account-selector {
   display: grid;
   gap: 15px;
+}
+
+.account-wide {
+  grid-column: 1 / -1;
+}
+
+.account-buttons {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.account-form {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  min-width: 0;
+  padding: 22px 0;
+  border-top: 1px solid var(--line-strong);
+}
+
+.account-form h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.4;
+}
+
+.account-form > button {
+  align-self: flex-start;
+  margin-top: auto;
+}
+
+.account-fields,
+.credential-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.credential-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.form-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.cookie-input {
+  height: auto;
+  min-height: 106px;
+  resize: vertical;
+  padding: 12px 13px;
+  overflow-wrap: anywhere;
+}
+
+.credential-identity {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.alias-open {
+  border: 0;
+  padding: 8px 0;
+  background: transparent;
+  text-align: left;
+  align-self: stretch;
+}
+
+.alias-open:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 4px;
 }
 
 .account-details {
@@ -1161,6 +1242,9 @@ h1 {
 }
 
 @media (max-width: 1100px) {
+  .credential-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .account-view,
   .create-view,
   .settings-view {
@@ -1177,6 +1261,10 @@ h1 {
 }
 
 @media (max-width: 760px) {
+  .account-fields,
+  .credential-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .app-shell {
     padding: 20px 14px 32px;
   }

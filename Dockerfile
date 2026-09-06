@@ -20,3 +20,4 @@ WORKDIR /app
 COPY --from=builder /build/icloud-prime .
 EXPOSE 8081
 ENTRYPOINT ["/app/icloud-prime"]
+CMD ["-addr", ":8081"]

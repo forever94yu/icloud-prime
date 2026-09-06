@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -44,6 +45,7 @@ type authState struct {
 	password   string
 	frameId    string
 	clientId   string
+	challenge  string
 	authAttr   string
 	sessionID  string
 	scnt       string
@@ -82,6 +84,7 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 	if err != nil {
 		return fmt.Errorf("auth init: %w", err)
 	}
+	state.challenge = authInitResp.C
 
 	// 5. 解码 salt 和 B
 	bDec, err := base64.StdEncoding.DecodeString(authInitResp.B)
@@ -95,10 +98,16 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 
 	// 6. 生成密码密钥
 	passHash := sha256.Sum256([]byte(password))
-	passKey := pbkdf2.Key(passHash[:], saltDec, authInitResp.Iteration, 32, sha256.New)
+	passwordInput := passHash[:]
+	if authInitResp.Protocol == "s2k_fo" {
+		passwordInput = []byte(hex.EncodeToString(passwordInput))
+	}
+	passKey := pbkdf2.Key(passwordInput, saltDec, authInitResp.Iteration, 32, sha256.New)
 
 	// 7. 处理挑战
-	srpClient.ProcessClientChanllenge([]byte(username), passKey, saltDec, bDec)
+	if err := srpClient.ProcessClientChanllenge([]byte(username), passKey, saltDec, bDec); err != nil {
+		return fmt.Errorf("invalid SRP challenge: %w", err)
+	}
 
 	// 8. 提交 SRP 响应 (可能触发 2FA)
 	if err := c.authComplete(state, base64.StdEncoding.EncodeToString(srpClient.M1), base64.StdEncoding.EncodeToString(srpClient.M2), otpProvider); err != nil {
@@ -153,8 +162,11 @@ func (c *Client) authStart(state *authState) error {
 
 // authFederate 提交用户名
 func (c *Client) authFederate(state *authState) error {
-	data := `{"accountName":"` + state.username + `","rememberMe":true}`
-	req, err := http.NewRequest("POST", authFederate, bytes.NewReader([]byte(data)))
+	data, err := json.Marshal(map[string]any{"accountName": state.username, "rememberMe": true})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", authFederate, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -210,9 +222,18 @@ func (c *Client) authInit(state *authState, a string) (*authInitResp, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auth init failed: HTTP %d", resp.StatusCode)
+	}
 	var result authInitResp
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	if result.Iteration <= 0 || result.Iteration > 1000000 || result.B == "" || result.Salt == "" || result.C == "" {
+		return nil, fmt.Errorf("invalid auth init response: missing or invalid SRP challenge")
+	}
+	if result.Protocol != "s2k" && result.Protocol != "s2k_fo" {
+		return nil, fmt.Errorf("unsupported SRP protocol: %q", result.Protocol)
 	}
 	return &result, nil
 }
@@ -224,7 +245,7 @@ func (c *Client) authComplete(state *authState, m1, m2 string, otpProvider OTPPr
 		"rememberMe":  true,
 		"trustTokens": []string{},
 		"m1":          m1,
-		"c":           state.clientId,
+		"c":           state.challenge,
 		"m2":          m2,
 	}
 

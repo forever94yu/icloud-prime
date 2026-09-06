@@ -51,7 +51,7 @@ func newCreateJobTestServer(t *testing.T) *Server {
 func TestCreateBatchRejectsCountAboveFive(t *testing.T) {
 	srv := newCreateJobTestServer(t)
 	body := bytes.NewBufferString(`{"account_id":"acc_1","count":6}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/create/batch", body)
+	req := localRequest(http.MethodPost, "/api/create/batch", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -79,7 +79,7 @@ func TestCreateAliasKeepsExactLabel(t *testing.T) {
 	}
 	srv := NewWithScheduler(mgr, scheduler, false)
 	body := bytes.NewBufferString(`{"account_id":"acc_1","label":"GitHub 注册"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/create", body)
+	req := localRequest(http.MethodPost, "/api/create", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -96,7 +96,7 @@ func TestCreateAliasKeepsExactLabel(t *testing.T) {
 func TestCreateJobsCreatesDurationJob(t *testing.T) {
 	srv := newCreateJobTestServer(t)
 	body := bytes.NewBufferString(`{"account_id":"acc_1","mode":"duration","duration_hours":2,"label_prefix":"自动"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/create/jobs", body)
+	req := localRequest(http.MethodPost, "/api/create/jobs", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -116,7 +116,7 @@ func TestCreateJobsCreatesDurationJob(t *testing.T) {
 
 func TestCreateJobsListIncludesRemainingQuota(t *testing.T) {
 	srv := newCreateJobTestServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/create/jobs?account_id=acc_1", nil)
+	req := localRequest(http.MethodGet, "/api/create/jobs?account_id=acc_1", nil)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)

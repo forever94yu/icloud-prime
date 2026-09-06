@@ -42,11 +42,17 @@ func NewSRPClient(param *SRPParams, a []byte) *SRPClient {
 }
 
 // * ProcessClientChanllenge username, password, salt, B
-func (kls *SRPClient) ProcessClientChanllenge(username, password, salt, B []byte) {
+func (kls *SRPClient) ProcessClientChanllenge(username, password, salt, B []byte) error {
 	c := kls
-	c.X = c.Params.calculateX(salt, username, password)
 	bigB := intFromBytes(B)
+	if len(salt) == 0 || bigB.Sign() <= 0 || bigB.Cmp(c.Params.N) >= 0 {
+		return errors.New("invalid server challenge: salt must be non-empty and B must be 1..N-1")
+	}
+	c.X = c.Params.calculateX(salt, username, password)
 	u := c.Params.calculateU(c.A, bigB)
+	if u.Sign() == 0 {
+		return errors.New("invalid server challenge: scrambling parameter is zero")
+	}
 	k := c.Multiplier
 	S := c.Params.calculateS(k, c.X, c.Secret1, bigB, u)
 	c.K = c.Params.calculateK(S)
@@ -55,6 +61,7 @@ func (kls *SRPClient) ProcessClientChanllenge(username, password, salt, B []byte
 	A := padToN(c.A, c.Params)
 	c.M1 = c.Params.calculateM1(username, salt, A, B, c.K)
 	c.M2 = c.Params.calculateM2(A, c.M1, c.K)
+	return nil
 }
 
 func (c *SRPClient) GetABytes() []byte {

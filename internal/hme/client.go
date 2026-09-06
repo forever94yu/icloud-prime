@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"sort"
 	"strings"
@@ -84,6 +85,10 @@ type Client struct {
 //   - HTTP:  "http://user:pass@host:port"
 //   - SOCKS5: "socks5://user:pass@host:port"
 func NewClient(cookies map[string]string, host, proxy string, verbose bool) (*Client, error) {
+	cookies = maps.Clone(cookies)
+	if cookies == nil {
+		cookies = make(map[string]string)
+	}
 	if host == "" {
 		host = "icloud.com"
 	}
@@ -429,6 +434,16 @@ func (c *Client) ListAliases() ([]Alias, error) {
 	body, err := c.request("GET", c.serviceURL+"/v2/hme/list", nil, 0, MaxRetries)
 	if err != nil {
 		return nil, err
+	}
+	if !gjson.Valid(body) {
+		return nil, fmt.Errorf("invalid alias list JSON response")
+	}
+	root := gjson.Parse(body)
+	if success := root.Get("success"); success.Exists() && !success.Bool() {
+		return nil, fmt.Errorf("获取别名失败: %s", nonEmpty(root.Get("error.errorMessage").String(), "unknown"))
+	}
+	if !root.Get("result.hmeEmails").IsArray() && !findFirstDictArray(root).IsArray() {
+		return nil, fmt.Errorf("invalid alias list response: missing hmeEmails")
 	}
 	aliases := parseAliasList(body)
 	c.log("共 %d 个别名", len(aliases))

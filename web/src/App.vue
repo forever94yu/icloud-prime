@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import {
   AlertCircle,
   CalendarClock,
@@ -37,6 +37,8 @@ type Account = {
   alias_total?: number;
   alias_active?: number;
   last_validated?: string;
+  has_cookies?: boolean;
+  has_app_password?: boolean;
 };
 
 type Alias = {
@@ -57,6 +59,7 @@ type Message = {
   date: string;
   preview: string;
   body?: string;
+  unread?: boolean;
 };
 
 type FolderOption = {
@@ -82,12 +85,7 @@ type InboxData = {
   count: number;
   method: string;
   messages: Message[] | null;
-};
-
-type MessageDetailData = {
-  account_id: string;
-  method: string;
-  message: Message;
+  warning?: string;
 };
 
 type MessageBatchData = {
@@ -200,7 +198,58 @@ const busy = ref({
   prefetch: false,
 });
 const inboxMeta = ref({ method: "", count: 0, folder: "all" });
+const inboxAlias = ref("");
 const prefetchSeq = ref(0);
+const apiToken = ref(localStorage.getItem("icloud-prime.api-token") || "");
+const tokenDraft = ref(apiToken.value);
+const authRequired = ref(false);
+const accountFormOpen = ref(false);
+const accountActionBusy = ref(false);
+const aliasActionBusy = ref(false);
+const accountForm = ref({ name: "", real_email: "", host: "icloud.com", proxy: "", cookies: "" });
+const cookieInput = ref("");
+const passwordForm = ref({ icloud_email: "", app_password: "" });
+const loginForm = ref({ password: "", otp_code: "" });
+let accountEpoch = 0;
+const requestSequences = new Map<string, number>();
+
+function accountContext() {
+  const accountID = selectedAccountId.value;
+  const epoch = accountEpoch;
+  return { accountID, current: () => epoch === accountEpoch && accountID === selectedAccountId.value };
+}
+
+function readContext(kind: string) {
+  const context = accountContext();
+  const sequence = (requestSequences.get(kind) || 0) + 1;
+  requestSequences.set(kind, sequence);
+  return { ...context, current: () => context.current() && requestSequences.get(kind) === sequence };
+}
+
+function resetAccountData() {
+  accountEpoch++;
+  prefetchSeq.value++;
+  aliases.value = [];
+  folders.value = defaultFolders;
+  messages.value = [];
+  createJobs.value = [];
+  remainingThisHour.value = 0;
+  selectedAlias.value = "";
+  selectedFolder.value = "all";
+  selectedMessageId.value = "";
+  mailModalOpen.value = false;
+  inboxMeta.value = { method: "", count: 0, folder: "all" };
+  inboxAlias.value = "";
+  cookieInput.value = "";
+  passwordForm.value = { icloud_email: activeAccount.value?.icloud_email || "", app_password: "" };
+  loginForm.value = { password: "", otp_code: "" };
+  accountActionBusy.value = false;
+  aliasActionBusy.value = false;
+  for (const key of Object.keys(busy.value) as (keyof typeof busy.value)[]) busy.value[key] = false;
+  clearFeedback();
+}
+
+watch(selectedAccountId, resetAccountData, { flush: "sync" });
 
 const activeAccount = computed(() =>
   accounts.value.find((account) => account.id === selectedAccountId.value),
@@ -223,8 +272,8 @@ const folderOptions = computed(() => {
 const accountDisplayEmail = computed(
   () => activeAccount.value?.icloud_email || activeAccount.value?.real_email || "未设置邮箱",
 );
-const cookieStatusLabel = computed(() => (selectedAccountId.value ? "已配置" : "未配置"));
-const inboxStatusLabel = computed(() => (selectedAccountId.value ? "已配置" : "未配置"));
+const cookieStatusLabel = computed(() => (activeAccount.value?.has_cookies ? "已配置" : "未配置"));
+const inboxStatusLabel = computed(() => (activeAccount.value?.has_app_password || activeAccount.value?.has_cookies ? "已配置" : "未配置"));
 const pageTitle = computed(() => pageTitles[activeTab.value]);
 const pageSubtitle = computed(() => {
   if (activeTab.value === "inbox" && selectedAliasInfo.value) {
@@ -276,10 +325,19 @@ const extractedCodes = computed(() =>
 );
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
+  const token = apiToken.value;
+  const epoch = accountEpoch;
+  const headers = new Headers(init?.headers);
+  headers.set("Content-Type", "application/json");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init,
+    headers,
   });
+  if (response.status === 401 && token === apiToken.value && epoch === accountEpoch && url === "/api/accounts") {
+    authRequired.value = true;
+    activeTab.value = "settings";
+  }
   const body = (await response.json()) as ApiResponse<T>;
   if (!response.ok || !body.success) {
     throw new Error(body.message || `请求失败: ${response.status}`);
@@ -296,67 +354,200 @@ function clearFeedback() {
   notice.value = "";
 }
 
+function parseCookieInput(input: string): Record<string, string> {
+  const value = input.trim();
+  if (!value) throw new Error("请输入 Cookie。");
+  if (value.startsWith("{")) {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object" ||
+        !Object.keys(parsed).length || Object.values(parsed).some((item) => typeof item !== "string")) {
+      throw new Error("Cookie JSON 必须是非空的字符串键值对象。");
+    }
+    return parsed as Record<string, string>;
+  }
+  const entries = value.split(";").filter((item) => item.trim()).map((item) => {
+    const split = item.indexOf("=");
+    if (split < 1 || !item.slice(0, split).trim()) throw new Error("Cookie 格式应为 name=value。");
+    return [item.slice(0, split).trim(), item.slice(split + 1).trim()];
+  });
+  return Object.fromEntries(entries);
+}
+
+async function saveApiToken() {
+  apiToken.value = tokenDraft.value.trim();
+  if (apiToken.value) localStorage.setItem("icloud-prime.api-token", apiToken.value);
+  else localStorage.removeItem("icloud-prime.api-token");
+  accounts.value = [];
+  selectedAccountId.value = "";
+  resetAccountData();
+  authRequired.value = false;
+  await refreshAll();
+}
+
+async function addAccount() {
+  if (accountActionBusy.value) return;
+  const context = accountContext();
+  accountActionBusy.value = true;
+  clearFeedback();
+  try {
+    const form = accountForm.value;
+    if (form.cookies.trim()) parseCookieInput(form.cookies);
+    const created = await api<Account>("/api/accounts", {
+      method: "POST",
+      body: JSON.stringify({ ...form, name: form.name.trim(), real_email: form.real_email.trim() }),
+    });
+    if (!context.current()) return;
+    accounts.value = [...accounts.value, created];
+    selectedAccountId.value = created.id;
+    accountForm.value = { name: "", real_email: "", host: "icloud.com", proxy: "", cookies: "" };
+    accountFormOpen.value = false;
+    await loadAccountData();
+    if (selectedAccountId.value === created.id) notice.value = "账号已添加";
+  } catch (err) {
+    if (context.current()) setError(err);
+  } finally {
+    if (context.current()) accountActionBusy.value = false;
+  }
+}
+
+async function removeAccount() {
+  const context = accountContext();
+  if (!context.accountID || !window.confirm(`删除账号“${activeAccount.value?.name || context.accountID}”？`)) return;
+  accountActionBusy.value = true;
+  clearFeedback();
+  try {
+    await api(`/api/accounts/${encodeURIComponent(context.accountID)}`, { method: "DELETE" });
+    if (!context.current()) return;
+    accounts.value = accounts.value.filter((account) => account.id !== context.accountID);
+    selectedAccountId.value = accounts.value[0]?.id || "";
+    if (!selectedAccountId.value) accountFormOpen.value = true;
+    await loadAccountData({ includeInbox: true });
+  } catch (err) {
+    if (context.current()) setError(err);
+  } finally {
+    if (context.current()) accountActionBusy.value = false;
+  }
+}
+
+async function saveCredentials(kind: "cookies" | "password" | "login") {
+  const context = accountContext();
+  if (!context.accountID || accountActionBusy.value) return;
+  accountActionBusy.value = true;
+  clearFeedback();
+  try {
+    const body = kind === "cookies" ? { cookies: parseCookieInput(cookieInput.value) }
+      : kind === "password" ? { ...passwordForm.value } : { ...loginForm.value };
+    const result = await api<{ warning?: string }>(`/api/accounts/${encodeURIComponent(context.accountID)}/${kind}`, {
+      method: kind === "cookies" ? "PUT" : "POST", body: JSON.stringify(body),
+    });
+    if (!context.current()) return;
+    cookieInput.value = "";
+    passwordForm.value.app_password = "";
+    loginForm.value = { password: "", otp_code: "" };
+    await loadAccounts();
+    if (!context.current()) return;
+    await loadAccountData({ includeInbox: true, force: true });
+    if (context.current()) notice.value = result.warning ? `凭据已保存；${result.warning}` : kind === "login" ? "登录成功" : "凭据已更新";
+  } catch (err) {
+    if (context.current()) setError(err);
+  } finally {
+    if (context.current()) accountActionBusy.value = false;
+  }
+}
+
+async function changeAlias(alias: Alias, action: "deactivate" | "reactivate" | "delete") {
+  const context = accountContext();
+  if (!context.accountID || aliasActionBusy.value || !aliases.value.includes(alias)) return;
+  if (action === "delete" && !window.confirm(`永久删除别名 ${alias.email}？`)) return;
+  aliasActionBusy.value = true;
+  clearFeedback();
+  try {
+    await api(`/api/aliases/${encodeURIComponent(alias.anonymousId)}${action === "delete" ? "" : `/${action}`}`, {
+      method: action === "delete" ? "DELETE" : "POST", body: JSON.stringify({ account_id: context.accountID }),
+    });
+    if (!context.current()) return;
+    await loadAliases({ force: true });
+    if (context.current()) notice.value = action === "delete" ? "别名已删除" : action === "deactivate" ? "别名已停用" : "别名已启用";
+  } catch (err) {
+    if (context.current()) setError(err);
+  } finally {
+    if (context.current()) aliasActionBusy.value = false;
+  }
+}
+
 async function loadAccounts() {
+  const context = readContext("accounts");
   busy.value.accounts = true;
   clearFeedback();
   try {
     const data = await api<Account[]>("/api/accounts");
+    if (!context.current()) return;
     accounts.value = data;
-    if (!selectedAccountId.value && data.length > 0) {
-      selectedAccountId.value = data[0].id;
+    authRequired.value = false;
+    if (!data.some((account) => account.id === selectedAccountId.value)) {
+      selectedAccountId.value = data[0]?.id || "";
+    }
+    if (data.length === 0) {
+      activeTab.value = "account";
+      accountFormOpen.value = true;
     }
   } catch (err) {
-    setError(err);
+    if (context.current()) setError(err);
   } finally {
-    busy.value.accounts = false;
+    if (context.current()) busy.value.accounts = false;
   }
 }
 
 async function loadMailboxes(options: { force?: boolean } = {}) {
   if (!selectedAccountId.value) return;
+  const context = readContext("folders");
   busy.value.folders = true;
   try {
-    const params = new URLSearchParams({ account_id: selectedAccountId.value });
+    const params = new URLSearchParams({ account_id: context.accountID });
     if (options.force) params.set("refresh", "1");
     const data = await api<MailboxesData>(`/api/mailboxes?${params.toString()}`);
+    if (!context.current()) return;
     folders.value = data.folders?.length ? data.folders : defaultFolders;
   } catch {
-    folders.value = defaultFolders;
+    if (context.current()) folders.value = defaultFolders;
   } finally {
-    busy.value.folders = false;
+    if (context.current()) busy.value.folders = false;
   }
 }
 
 async function loadAliases(options: { force?: boolean } = {}) {
   if (!selectedAccountId.value) return;
+  const context = readContext("aliases");
   busy.value.aliases = true;
-  clearFeedback();
   try {
-    const params = new URLSearchParams({ account_id: selectedAccountId.value });
+    const params = new URLSearchParams({ account_id: context.accountID });
     if (options.force) params.set("refresh", "1");
     const data = await api<AliasesData>(`/api/aliases?${params.toString()}`);
+    if (!context.current()) return;
     aliases.value = data.aliases ?? [];
     if (selectedAlias.value && !aliases.value.some((item) => item.email === selectedAlias.value)) {
       selectedAlias.value = "";
     }
   } catch (err) {
-    setError(err);
+    if (context.current()) setError(err);
   } finally {
-    busy.value.aliases = false;
+    if (context.current()) busy.value.aliases = false;
   }
 }
 
 async function loadCreateJobs() {
   if (!selectedAccountId.value) return;
+  const context = readContext("jobs");
   busy.value.jobs = true;
   try {
-    const data = await api<CreateJobsData>(`/api/create/jobs?account_id=${selectedAccountId.value}`);
+    const data = await api<CreateJobsData>(`/api/create/jobs?account_id=${encodeURIComponent(context.accountID)}`);
+    if (!context.current()) return;
     createJobs.value = data.jobs ?? [];
     remainingThisHour.value = data.remaining_this_hour ?? remainingThisHour.value;
   } catch (err) {
-    setError(err);
+    if (context.current()) setError(err);
   } finally {
-    busy.value.jobs = false;
+    if (context.current()) busy.value.jobs = false;
   }
 }
 
@@ -372,29 +563,32 @@ async function loadAccountData(options: { includeInbox?: boolean; withBody?: boo
 
 async function createAlias() {
   if (!selectedAccountId.value) return;
+  const context = accountContext();
   busy.value.create = true;
   clearFeedback();
   try {
     const label = newLabel.value.trim() || `Web 管理台 ${new Date().toLocaleString()}`;
     const created = await api<CreateData>("/api/create", {
       method: "POST",
-      body: JSON.stringify({ account_id: selectedAccountId.value, label }),
+      body: JSON.stringify({ account_id: context.accountID, label }),
     });
+    if (!context.current()) return;
     notice.value = `已创建 ${created.email}`;
     selectedAlias.value = created.email;
     selectedFolder.value = "all";
     newLabel.value = "";
     await Promise.all([loadAliases({ force: true }), loadCreateJobs(), loadInbox(created.email)]);
-    activeTab.value = "inbox";
+    if (context.current()) activeTab.value = "inbox";
   } catch (err) {
-    setError(err);
+    if (context.current()) setError(err);
   } finally {
-    busy.value.create = false;
+    if (context.current()) busy.value.create = false;
   }
 }
 
 async function createAliasBatch() {
   if (!selectedAccountId.value) return;
+  const context = accountContext();
   busy.value.batch = true;
   clearFeedback();
   try {
@@ -402,13 +596,14 @@ async function createAliasBatch() {
     const data = await api<BatchCreateData>("/api/create/batch", {
       method: "POST",
       body: JSON.stringify({
-        account_id: selectedAccountId.value,
+        account_id: context.accountID,
         count: Math.min(5, Math.max(1, Number(batchCount.value) || 1)),
         label_prefix: labelPrefix,
       }),
     });
+    if (!context.current()) return;
     remainingThisHour.value = data.remaining_this_hour;
-    const lastCreated = data.created.at(-1);
+    const lastCreated = data.created?.at(-1);
     if (lastCreated) {
       selectedAlias.value = lastCreated.email;
       selectedFolder.value = "all";
@@ -416,33 +611,35 @@ async function createAliasBatch() {
     notice.value =
       data.message ||
       `已创建 ${data.created_count} 个别名${data.skipped_count ? `，跳过 ${data.skipped_count} 个` : ""}`;
+    if (data.last_error) notice.value += `；${data.last_error}`;
     await Promise.all([loadAliases({ force: true }), loadCreateJobs()]);
-    if (lastCreated) {
+    if (lastCreated && context.current()) {
       await loadInbox(lastCreated.email);
-      activeTab.value = "inbox";
+      if (context.current()) activeTab.value = "inbox";
     }
   } catch (err) {
-    setError(err);
+    if (context.current()) setError(err);
   } finally {
-    busy.value.batch = false;
+    if (context.current()) busy.value.batch = false;
   }
 }
 
 async function saveCreateJob() {
   if (!selectedAccountId.value) return;
+  const context = accountContext();
   busy.value.jobAction = true;
   clearFeedback();
   try {
     const body =
       jobMode.value === "duration"
         ? {
-            account_id: selectedAccountId.value,
+            account_id: context.accountID,
             label_prefix: jobLabelPrefix.value.trim() || "自动创建",
             mode: jobMode.value,
             duration_hours: Math.max(1, Number(durationHours.value) || 1),
           }
         : {
-            account_id: selectedAccountId.value,
+            account_id: context.accountID,
             label_prefix: jobLabelPrefix.value.trim() || "自动创建",
             mode: jobMode.value,
             start_time: dailyStart.value,
@@ -452,12 +649,13 @@ async function saveCreateJob() {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (!context.current()) return;
     notice.value = `任务已保存：${job.id}`;
     await loadCreateJobs();
   } catch (err) {
-    setError(err);
+    if (context.current()) setError(err);
   } finally {
-    busy.value.jobAction = false;
+    if (context.current()) busy.value.jobAction = false;
   }
 }
 
@@ -470,73 +668,87 @@ async function resumeCreateJob(job: CreateJob) {
 }
 
 async function updateCreateJobStatus(job: CreateJob, action: "pause" | "resume") {
+  const context = accountContext();
+  if (job.account_id !== context.accountID) return;
   busy.value.jobAction = true;
   clearFeedback();
   try {
     await api<CreateJob>(`/api/create/jobs/${job.id}/${action}`, { method: "POST" });
+    if (!context.current()) return;
     notice.value = action === "pause" ? "任务已暂停" : "任务已恢复";
     await loadCreateJobs();
   } catch (err) {
-    setError(err);
+    if (context.current()) setError(err);
   } finally {
-    busy.value.jobAction = false;
+    if (context.current()) busy.value.jobAction = false;
   }
 }
 
 async function deleteCreateJob(job: CreateJob) {
+  const context = accountContext();
+  if (job.account_id !== context.accountID || !window.confirm(`删除任务“${job.label_prefix || job.id}”？`)) return;
   busy.value.jobAction = true;
   clearFeedback();
   try {
     await api<{ id: string }>(`/api/create/jobs/${job.id}`, { method: "DELETE" });
+    if (!context.current()) return;
     notice.value = "任务已删除";
     await loadCreateJobs();
   } catch (err) {
-    setError(err);
+    if (context.current()) setError(err);
   } finally {
-    busy.value.jobAction = false;
+    if (context.current()) busy.value.jobAction = false;
   }
 }
 
 async function loadInbox(alias = selectedAlias.value, options: { prefetchBody?: boolean } = {}) {
   if (!selectedAccountId.value) return;
+  const context = readContext("inbox");
+  const folder = selectedFolder.value;
+  prefetchSeq.value++;
+  busy.value.prefetch = false;
   busy.value.inbox = true;
+  messages.value = [];
+  inboxAlias.value = "";
   mailModalOpen.value = false;
-  clearFeedback();
+  error.value = "";
   try {
     const params = new URLSearchParams({
-      account_id: selectedAccountId.value,
+      account_id: context.accountID,
       limit: String(Math.min(100, Math.max(1, Number(mailLimit.value) || 10))),
       days: "30",
-      folder: selectedFolder.value,
+      folder,
     });
     if (alias) params.set("alias", alias);
     const data = await api<InboxData>(`/api/inbox?${params.toString()}`);
+    if (!context.current()) return;
     messages.value = data.messages ?? [];
+    inboxAlias.value = alias;
+    if (data.warning) notice.value = data.warning;
     inboxMeta.value = {
       method: data.method || "unknown",
       count: data.count,
-      folder: data.folder || selectedFolder.value,
+      folder: data.folder || folder,
     };
     if (!messages.value.some((message) => message.id === selectedMessageId.value)) {
       selectedMessageId.value = messages.value[0]?.id ?? "";
     }
     void prefetchMessageBodies({ priorityId: selectedMessageId.value, force: Boolean(options.prefetchBody) });
   } catch (err) {
-    setError(err);
+    if (context.current()) setError(err);
   } finally {
-    busy.value.inbox = false;
+    if (context.current()) busy.value.inbox = false;
   }
 }
 
 async function refreshAll() {
+  const token = apiToken.value;
   await loadAccounts();
+  if (token !== apiToken.value || authRequired.value) return;
   await loadAccountData({ includeInbox: true, withBody: activeTab.value === "codes", force: true });
 }
 
 async function handleAccountChange() {
-  selectedAlias.value = "";
-  selectedMessageId.value = "";
-  mailModalOpen.value = false;
   await loadAccountData({ includeInbox: true, withBody: activeTab.value === "codes" });
 }
 
@@ -557,7 +769,7 @@ function switchTab(tab: AppTab) {
 async function selectMessage(message: Message) {
   selectedMessageId.value = message.id;
   mailModalOpen.value = true;
-  if (!message.body) {
+  if (message.body === undefined) {
     void prefetchMessageBodies({ priorityId: message.id, force: true });
   }
 }
@@ -567,8 +779,12 @@ function closeMailModal() {
 }
 
 async function copyText(text: string) {
-  await navigator.clipboard.writeText(text);
-  notice.value = "已复制到剪贴板";
+  try {
+    await navigator.clipboard.writeText(text);
+    notice.value = "已复制到剪贴板";
+  } catch {
+    error.value = "无法访问剪贴板，请使用 HTTPS 或本机地址。";
+  }
 }
 
 function clearAliasSelection() {
@@ -577,26 +793,6 @@ function clearAliasSelection() {
   mailModalOpen.value = false;
   activeTab.value = "inbox";
   void loadInbox();
-}
-
-async function loadMessageDetail(message: Message) {
-  if (!selectedAccountId.value || message.body || !message.uid) return;
-  busy.value.message = true;
-  try {
-    const params = new URLSearchParams({
-      account_id: selectedAccountId.value,
-      folder: message.folder || selectedFolder.value || "INBOX",
-    });
-    const data = await api<MessageDetailData>(`/api/messages/${encodeURIComponent(message.uid)}?${params.toString()}`);
-    const full = data.message;
-    messages.value = messages.value.map((item) =>
-      item.id === message.id ? { ...item, ...full, id: item.id, uid: item.uid, folder: item.folder } : item,
-    );
-  } catch (err) {
-    setError(err);
-  } finally {
-    busy.value.message = false;
-  }
 }
 
 async function ensureCodeBodies() {
@@ -609,44 +805,47 @@ async function ensureCodeBodies() {
 
 async function prefetchMessageBodies(options: { priorityId?: string; force?: boolean } = {}) {
   if (!selectedAccountId.value) return;
-  const limit = Math.min(50, Math.max(1, Number(mailLimit.value) || 10));
-  const candidates = [...visibleMessages.value]
+  const context = accountContext();
+  const folder = selectedFolder.value;
+  const candidates = [...messages.value]
     .sort((a, b) => {
       if (a.id === options.priorityId) return -1;
       if (b.id === options.priorityId) return 1;
       return 0;
     })
-    .filter((message) => message.uid && (options.force || !message.body))
-    .slice(0, limit);
+    .filter((message) => message.uid && message.body === undefined);
   if (candidates.length === 0) return;
 
   const seq = prefetchSeq.value + 1;
   prefetchSeq.value = seq;
   busy.value.prefetch = true;
   try {
-    const data = await api<MessageBatchData>("/api/messages", {
-      method: "POST",
-      body: JSON.stringify({
-        account_id: selectedAccountId.value,
-        messages: candidates.map((message) => ({
-          uid: message.uid,
-          folder: message.folder || selectedFolder.value || "INBOX",
-        })),
-      }),
-    });
-    if (seq !== prefetchSeq.value) return;
-    const byKey = new Map<string, Message>();
-    for (const message of data.messages ?? []) {
-      if (message.uid) byKey.set(`${message.folder || "INBOX"}:${message.uid}`, message);
+    for (let offset = 0; offset < candidates.length; offset += 50) {
+      if (!context.current() || seq !== prefetchSeq.value) return;
+      const data = await api<MessageBatchData>("/api/messages", {
+        method: "POST",
+        body: JSON.stringify({
+          account_id: context.accountID,
+          messages: candidates.slice(offset, offset + 50).map((message) => ({
+            uid: message.uid,
+            folder: message.folder || folder || "INBOX",
+          })),
+        }),
+      });
+      if (!context.current() || seq !== prefetchSeq.value) return;
+      const byKey = new Map<string, Message>();
+      for (const message of data.messages ?? []) {
+        if (message.uid) byKey.set(`${message.folder || "INBOX"}:${message.uid}`, message);
+      }
+      messages.value = messages.value.map((item) => {
+        const full = item.uid ? byKey.get(`${item.folder || folder || "INBOX"}:${item.uid}`) : undefined;
+        return full ? { ...item, ...full, id: item.id, uid: item.uid, folder: item.folder, unread: item.unread ?? full.unread } : item;
+      });
     }
-    messages.value = messages.value.map((item) => {
-      const full = item.uid ? byKey.get(`${item.folder || selectedFolder.value || "INBOX"}:${item.uid}`) : undefined;
-      return full ? { ...item, ...full, id: item.id, uid: item.uid, folder: item.folder } : item;
-    });
   } catch (err) {
-    if (options.force) setError(err);
+    if (context.current() && seq === prefetchSeq.value && options.force) setError(err);
   } finally {
-    if (seq === prefetchSeq.value) {
+    if (context.current() && seq === prefetchSeq.value) {
       busy.value.prefetch = false;
     }
   }
@@ -705,16 +904,12 @@ function senderName(message?: Message) {
 }
 
 function isHideMyEmailMessage(message: Message) {
-  const text = `${message.to || ""} ${message.from || ""}`.toLowerCase();
-  return text.includes("@icloud.com") || Boolean(selectedAlias.value && text.includes(selectedAlias.value.toLowerCase()));
+  const recipients = new Set((message.to || "").toLowerCase().match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+/g) || []);
+  return aliases.value.some((alias) => recipients.has(alias.email.toLowerCase()) || alias.email.toLowerCase() === inboxAlias.value.toLowerCase());
 }
 
 function isUnreadMessage(message: Message) {
-  const extra = message as Message & { unread?: boolean; read?: boolean; seen?: boolean };
-  if (typeof extra.unread === "boolean") return extra.unread;
-  if (typeof extra.read === "boolean") return !extra.read;
-  if (typeof extra.seen === "boolean") return !extra.seen;
-  return true;
+  return message.unread === true;
 }
 
 function extractVerificationCode(message?: Message) {
@@ -792,6 +987,7 @@ onMounted(async () => {
             <span>当前账号</span>
           </div>
           <select id="account" v-model="selectedAccountId" class="select" @change="handleAccountChange">
+            <option v-if="accounts.length === 0" value="">暂无账号</option>
             <option v-for="account in accounts" :key="account.id" :value="account.id">
               {{ account.name || account.id }}
             </option>
@@ -803,6 +999,10 @@ onMounted(async () => {
             </span>
             <strong>{{ accountDisplayEmail }}</strong>
             <small>{{ activeAccount.host || "iCloud" }}</small>
+          </div>
+          <div class="account-buttons">
+            <button class="secondary-button" type="button" @click="accountFormOpen = !accountFormOpen"><Plus :size="16" />添加账号</button>
+            <button v-if="activeAccount" class="mini-button danger-button" type="button" title="删除账号" aria-label="删除账号" :disabled="accountActionBusy" @click="removeAccount"><Trash2 :size="16" /></button>
           </div>
         </article>
 
@@ -818,6 +1018,39 @@ onMounted(async () => {
           <strong>{{ inactiveAliases }}</strong>
           <span>已停用</span>
         </article>
+
+        <form v-if="accountFormOpen" class="account-form account-wide" @submit.prevent="addAccount">
+          <h3>添加账号</h3>
+          <div class="account-fields">
+            <label class="form-field">显示名称<input v-model="accountForm.name" class="input" required autocomplete="off" /></label>
+            <label class="form-field">Apple ID<input v-model="accountForm.real_email" class="input" type="email" autocomplete="username" /></label>
+            <label class="form-field">地区<select v-model="accountForm.host" class="select"><option value="icloud.com">全球 · icloud.com</option><option value="icloud.com.cn">中国大陆 · icloud.com.cn</option></select></label>
+            <label class="form-field">代理地址<input v-model="accountForm.proxy" class="input" placeholder="http:// 或 socks5://" autocomplete="off" /></label>
+            <label class="form-field account-wide">Cookie<textarea v-model="accountForm.cookies" class="input cookie-input" rows="3" placeholder="name=value; name2=value2 或 JSON" autocomplete="off"></textarea></label>
+          </div>
+          <button class="primary-button" type="submit" :disabled="accountActionBusy || authRequired"><Loader2 v-if="accountActionBusy" class="spin" :size="16" /><Plus v-else :size="16" />添加账号</button>
+        </form>
+
+        <div v-if="activeAccount" class="credential-grid account-wide">
+          <form class="account-form" @submit.prevent="saveCredentials('cookies')">
+            <h3>Cookie</h3>
+            <label class="form-field">Cookie 值<textarea v-model="cookieInput" class="input cookie-input" rows="4" required autocomplete="off" placeholder="name=value; name2=value2 或 JSON"></textarea></label>
+            <button class="secondary-button" type="submit" :disabled="accountActionBusy"><RefreshCw :size="16" />更新 Cookie</button>
+          </form>
+          <form class="account-form" @submit.prevent="saveCredentials('password')">
+            <h3>IMAP 凭据</h3>
+            <label class="form-field">iCloud 邮箱<input v-model="passwordForm.icloud_email" class="input" type="email" required autocomplete="username" /></label>
+            <label class="form-field">应用专用密码<input v-model="passwordForm.app_password" class="input" type="password" required autocomplete="new-password" /></label>
+            <button class="secondary-button" type="submit" :disabled="accountActionBusy"><KeyRound :size="16" />保存密码</button>
+          </form>
+          <form class="account-form" @submit.prevent="saveCredentials('login')">
+            <h3>Apple ID 登录</h3>
+            <span class="credential-identity">{{ activeAccount.real_email || activeAccount.name }}</span>
+            <label class="form-field">Apple ID 密码<input v-model="loginForm.password" class="input" type="password" required autocomplete="current-password" /></label>
+            <label class="form-field">双重认证验证码<input v-model="loginForm.otp_code" class="input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" /></label>
+            <button class="secondary-button" type="submit" :disabled="accountActionBusy"><ShieldCheck :size="16" />登录</button>
+          </form>
+        </div>
       </section>
 
       <section v-if="activeTab === 'create'" class="create-view">
@@ -974,25 +1207,28 @@ onMounted(async () => {
         <div v-if="busy.aliases" class="empty-state">正在读取别名列表...</div>
         <div v-else-if="aliases.length === 0" class="empty-state">当前账号还没有隐私邮箱别名。</div>
         <div v-else class="alias-list">
-          <button
+          <article
             v-for="alias in aliases"
             :key="alias.anonymousId || alias.email"
             class="alias-row"
             :class="{ selected: selectedAlias === alias.email }"
-            type="button"
-            @click="chooseAlias(alias)"
           >
-            <span class="alias-main">
+            <button class="alias-main alias-open" type="button" @click="chooseAlias(alias)">
               <strong>{{ alias.email }}</strong>
               <small>{{ alias.label || "未命名" }}</small>
-            </span>
+            </button>
             <span class="alias-meta">
               <span class="soft-tag" :class="{ muted: !alias.active }">
                 {{ alias.active ? "启用" : "停用" }}
               </span>
               <small>{{ formatDate(alias.createdAt) }}</small>
+              <span class="job-actions">
+                <button class="mini-button" type="button" title="复制别名" aria-label="复制别名" @click="copyText(alias.email)"><Copy :size="14" /></button>
+                <button class="mini-button" type="button" :title="alias.active ? '停用别名' : '启用别名'" :aria-label="alias.active ? '停用别名' : '启用别名'" :disabled="aliasActionBusy" @click="changeAlias(alias, alias.active ? 'deactivate' : 'reactivate')"><Pause v-if="alias.active" :size="14" /><Play v-else :size="14" /></button>
+                <button class="mini-button danger-button" type="button" title="永久删除已停用别名" aria-label="删除别名" :disabled="aliasActionBusy || alias.active" @click="changeAlias(alias, 'delete')"><Trash2 :size="14" /></button>
+              </span>
             </span>
-          </button>
+          </article>
         </div>
       </section>
 
@@ -1076,6 +1312,12 @@ onMounted(async () => {
       </section>
 
       <section v-if="activeTab === 'settings'" class="settings-view">
+        <form class="account-form account-wide" @submit.prevent="saveApiToken">
+          <h3>API 访问令牌</h3>
+          <label class="form-field">Bearer Token<input v-model="tokenDraft" class="input" type="password" autocomplete="off" /></label>
+          <span v-if="authRequired" class="danger-text">访问被拒绝，请输入服务端配置的访问令牌。</span>
+          <button class="secondary-button" type="submit" :disabled="busy.accounts"><KeyRound :size="16" />保存并连接</button>
+        </form>
         <article class="surface settings-panel">
           <div class="surface-title">
             <Settings2 :size="19" />

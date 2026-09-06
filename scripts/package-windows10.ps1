@@ -53,7 +53,7 @@ Set-Content -LiteralPath (Join-Path $stageDir "start.bat") -Encoding ASCII -Valu
 cd /d "%~dp0"
 if not exist data mkdir data
 if not exist logs mkdir logs
-start "iCloud Prime" /min cmd /c "icloud-prime.exe -addr :8081 -data .\data > .\logs\server.out.log 2> .\logs\server.err.log"
+start "iCloud Prime" /min cmd /c "icloud-prime.exe -addr 127.0.0.1:8081 -data .\data > .\logs\server.out.log 2> .\logs\server.err.log"
 echo iCloud Prime started.
 echo Open http://127.0.0.1:8081 in your browser.
 pause
@@ -85,6 +85,8 @@ Security notes:
 4. Automatic creation jobs are stored locally in data\create_jobs.json.
 5. Do not share or upload data\accounts.json or data\create_jobs.json.
 6. logs\ only stores local runtime logs.
+7. The portable launcher only accepts local connections. Remote access requires
+   ICLOUD_PRIME_API_TOKEN and an explicit -addr :8081 argument.
 
 Example config:
 data\accounts.example.json only shows the field format. The recommended path is
@@ -143,6 +145,16 @@ $releaseNotes = @(
   "- Do not share data\accounts.json, data\create_jobs.json, Cookie values, or App-specific passwords."
 )
 Set-Content -LiteralPath (Join-Path $outputRootFullPath "v$Version-notes.md") -Encoding ASCII -Value $releaseNotes
+
+$changelogPath = Join-Path $repoRoot "CHANGELOG.md"
+if (Test-Path -LiteralPath $changelogPath) {
+  $changelog = Get-Content -LiteralPath $changelogPath -Raw
+  $escapedVersion = [regex]::Escape($Version)
+  $versionChanges = [regex]::Match($changelog, "(?ms)^## v$escapedVersion[^\r\n]*\r?\n(.*?)(?=^## |\z)")
+  if ($versionChanges.Success) {
+    Add-Content -LiteralPath (Join-Path $outputRootFullPath "v$Version-notes.md") -Encoding UTF8 -Value ("`n## Changes`n" + $versionChanges.Groups[1].Value.Trim())
+  }
+}
 
 Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath -Force
 

@@ -1,10 +1,11 @@
 {
   "name": "icloud-hme-console",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
+    "test": "node --test tests/*.test.cjs",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 5174"
   },

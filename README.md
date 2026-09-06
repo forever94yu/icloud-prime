@@ -98,7 +98,7 @@ Open the Releases page:
 Download:
 
 ```text
-icloud-prime-windows10-portable-v0.1.8.zip
+icloud-prime-windows10-portable-v0.1.9.zip
 ```
 
 ### 2. Extract
@@ -112,7 +112,7 @@ D:\Tools\icloud-prime
 The extracted folder contains:
 
 ```text
-icloud-prime-windows10-portable-v0.1.8/
+icloud-prime-windows10-portable-v0.1.9/
 |-- icloud-prime.exe
 |-- start.bat
 |-- stop.bat
@@ -137,7 +137,7 @@ Then open:
 Manual start:
 
 ```powershell
-.\icloud-prime.exe -addr :8081 -data .\data
+.\icloud-prime.exe -addr 127.0.0.1:8081 -data .\data
 ```
 
 ### 4. Add an Account
@@ -389,7 +389,7 @@ go build -ldflags="-s -w" -o icloud-prime.exe .
 ### 6. Run
 
 ```bash
-.\icloud-prime.exe -addr :8081 -data .\data
+.\icloud-prime.exe -addr 127.0.0.1:8081 -data .\data
 ```
 
 Open:
@@ -402,10 +402,10 @@ Open:
 .\icloud-prime.exe
 ```
 
-Uses `:8081` and `.\data`.
+Uses `127.0.0.1:8081` and `.\data`.
 
 ```bash
-.\icloud-prime.exe -addr :9000
+.\icloud-prime.exe -addr 127.0.0.1:9000
 ```
 
 Uses port `9000`.
@@ -421,6 +421,31 @@ Uses a custom data directory.
 ```
 
 Enables debug logging.
+
+## Remote Access and Docker
+
+Since v0.1.9, the default listener and portable launcher accept only local
+connections. Binding to a non-loopback address requires an API access token.
+Existing deployments using `-addr :8081` must configure a token when upgrading.
+
+```powershell
+$env:ICLOUD_PRIME_API_TOKEN = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
+.\icloud-prime.exe -addr :8081 -data .\data
+```
+
+Open Settings in the web console and enter the same API token. API clients send
+`Authorization: Bearer <token>`. The token is stored in this browser's local
+storage; it is separate from iCloud Cookies and App-specific passwords. Use an
+HTTPS reverse proxy when accessing the console over an untrusted network.
+
+The Docker image listens on `:8081` and also requires `ICLOUD_PRIME_API_TOKEN`.
+Mount a persistent volume at `/app/data` to preserve accounts, jobs, and quota.
+
+```bash
+docker run --rm -p 127.0.0.1:8081:8081 \
+  -e ICLOUD_PRIME_API_TOKEN=REPLACE_WITH_A_LONG_RANDOM_TOKEN \
+  -v icloud-prime-data:/app/data icloud-prime
+```
 
 ## API Summary
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ type WebClient struct {
 
 // NewWebClient 创建一个 Web 邮件客户端。
 func NewWebClient(cookies map[string]string, dsid, host string) *WebClient {
+	cookies = maps.Clone(cookies)
+	if cookies == nil {
+		cookies = make(map[string]string)
+	}
 	jar := tls_client.NewCookieJar()
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(30),
@@ -82,6 +87,11 @@ func NewWebClient(cookies map[string]string, dsid, host string) *WebClient {
 	return c
 }
 
+// CookiesSnapshot returns an independent copy of the current session cookies.
+func (c *WebClient) CookiesSnapshot() map[string]string {
+	return maps.Clone(c.cookies)
+}
+
 // origin 返回当前账号对应的 Web Origin。
 func (c *WebClient) origin() string {
 	return "https://www." + c.host
@@ -101,12 +111,30 @@ func (c *WebClient) setCommonHeaders(req *http.Request) {
 
 // withParams 给 URL 追加 clientBuildNumber / clientId / dsid 查询参数。
 func (c *WebClient) withParams(rawURL string) string {
-	sep := "?"
-	if strings.Contains(rawURL, "?") {
-		sep = "&"
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
 	}
-	return fmt.Sprintf("%s%sclientBuildNumber=%s&clientMasteringNumber=%s&clientId=%s&dsid=%s",
-		rawURL, sep, WebClientBuildNumber, WebClientBuildNumber, c.clientID, c.dsid)
+	params := u.Query()
+	params.Set("clientBuildNumber", WebClientBuildNumber)
+	params.Set("clientMasteringNumber", WebClientBuildNumber)
+	params.Set("clientId", c.clientID)
+	params.Set("dsid", c.dsid)
+	u.RawQuery = params.Encode()
+	return u.String()
+}
+
+func (c *WebClient) updateCookies(resp *http.Response) {
+	if c.cookies == nil {
+		c.cookies = make(map[string]string)
+	}
+	for _, cookie := range resp.Cookies() {
+		if cookie.MaxAge < 0 {
+			delete(c.cookies, cookie.Name)
+		} else if cookie.Value != "" {
+			c.cookies[cookie.Name] = cookie.Value
+		}
+	}
 }
 
 // resolveMccGateway 从 validate 响应中获取 mccgateway URL。
@@ -128,7 +156,11 @@ func (c *WebClient) resolveMccGateway() error {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("读取 validate 响应失败: %w", err)
+	}
+	c.updateCookies(resp)
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("validate 失败: HTTP %d - %s", resp.StatusCode, truncate(string(body), 200))
 	}
@@ -158,11 +190,26 @@ func (c *WebClient) resolveMccGateway() error {
 		mccURL = u.String()
 	}
 	c.mccGatewayURL = strings.TrimRight(mccURL, "/")
+	gateway, err := url.Parse(c.mccGatewayURL)
+	if err != nil {
+		return fmt.Errorf("invalid mccgateway URL: %w", err)
+	}
+	cookies := make([]*http.Cookie, 0, len(c.cookies))
+	for name, value := range c.cookies {
+		cookies = append(cookies, &http.Cookie{Name: name, Value: value, Path: "/"})
+	}
+	c.httpc.SetCookies(gateway, cookies)
 	return nil
 }
 
 // threadSearchResp 是 thread/search 接口的响应结构。
 type threadSearchResp struct {
+	Success          *bool  `json:"success"`
+	ErrorCode        string `json:"errorCode"`
+	ErrorDescription string `json:"errorDescription"`
+	Error            struct {
+		Message string `json:"errorMessage"`
+	} `json:"error"`
 	TotalThreadsReturned int `json:"totalThreadsReturned"`
 	ThreadList           []struct {
 		ThreadID  string   `json:"threadId"`
@@ -170,17 +217,22 @@ type threadSearchResp struct {
 		Senders   []string `json:"senders"`
 		Preview   string   `json:"preview"`
 		Timestamp int64    `json:"timestamp"`
+		Flags     []string `json:"flags"`
 	} `json:"threadList"`
 }
 
 // search 执行 thread/search 请求,返回解析后的邮件列表。
-func (c *WebClient) search(payload string) ([]Message, error) {
+func (c *WebClient) search(payload any) ([]Message, error) {
 	if err := c.resolveMccGateway(); err != nil {
 		return nil, err
 	}
 
 	searchURL := c.withParams(c.mccGatewayURL + "/mailws2/v1/thread/search")
-	req, err := http.NewRequest("POST", searchURL, strings.NewReader(payload))
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", searchURL, strings.NewReader(string(data)))
 	if err != nil {
 		return nil, err
 	}
@@ -192,17 +244,23 @@ func (c *WebClient) search(payload string) ([]Message, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取邮件响应失败: %w", err)
+	}
+	c.updateCookies(resp)
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("获取邮件失败: HTTP %d - %s", resp.StatusCode, truncate(string(body), 300))
 	}
-	if strings.Contains(string(body), `"success":false`) {
-		return nil, fmt.Errorf("获取邮件失败: %s", truncate(string(body), 300))
-	}
-
 	var result threadSearchResp
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("解析邮件响应失败: %w", err)
+	}
+	if result.ErrorCode != "" || (result.Success != nil && !*result.Success) {
+		return nil, fmt.Errorf("获取邮件失败: %s %s %s", result.ErrorCode, result.ErrorDescription, result.Error.Message)
+	}
+	if result.ThreadList == nil {
+		return nil, fmt.Errorf("invalid mail response: missing threadList")
 	}
 
 	messages := make([]Message, 0, len(result.ThreadList))
@@ -215,21 +273,25 @@ func (c *WebClient) search(payload string) ([]Message, error) {
 		if t.Timestamp > 0 {
 			date = time.UnixMilli(t.Timestamp).Format(time.RFC3339)
 		}
-		messages = append(messages, Message{
+		message := Message{
 			ID:      t.ThreadID,
 			From:    from,
 			Subject: t.Subject,
 			Preview: t.Preview,
 			Date:    date,
-		})
+		}
+		if t.Flags != nil {
+			unread := !hasAttr(t.Flags, "\\Seen")
+			message.Unread = &unread
+		}
+		messages = append(messages, message)
 	}
 	return messages, nil
 }
 
 // ListInbox 列出收件箱邮件。
 func (c *WebClient) ListInbox(limit int) ([]Message, error) {
-	payload := fmt.Sprintf(`{"responseType":"THREAD_DIGEST","includeFolderStatus":true,"maxResults":%d,"sessionHeaders":{"folder":"INBOX","modseq":null,"threadmodseq":null,"condstore":1,"qresync":1,"threadmode":1}}`, limit)
-	return c.search(payload)
+	return c.search(threadSearchPayload("", "", limit))
 }
 
 // SearchMails 搜索邮件。query 为空时等价于 ListInbox。
@@ -237,35 +299,37 @@ func (c *WebClient) SearchMails(query string, limit int) ([]Message, error) {
 	if query == "" {
 		return c.ListInbox(limit)
 	}
-	payload := fmt.Sprintf(`{"responseType":"THREAD_DIGEST","includeFolderStatus":false,"maxResults":%d,"query":%q,"sessionHeaders":{"folder":"INBOX","condstore":1,"qresync":1,"threadmode":1}}`, limit, query)
-	return c.search(payload)
+	return c.search(threadSearchPayload(query, "anyfield", limit))
 }
 
-// FindByAlias 查找发给指定别名的邮件——在本地过滤(Web API 不支持收件人搜索)。
+// FindByAlias asks iCloud to search recipient headers, which thread digests omit.
 func (c *WebClient) FindByAlias(alias string, limit int) ([]Message, error) {
-	// 拉取收件箱全部邮件(最多取 2*limit),本地过滤
-	batchSize := limit * 2
-	if batchSize < 50 {
-		batchSize = 50
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return c.ListInbox(limit)
 	}
-	raw, err := c.ListInbox(batchSize)
-	if err != nil {
-		return nil, err
-	}
+	return c.search(threadSearchPayload(alias, "recipient", limit))
+}
 
-	// 本地过滤: To/CC/BCC 或主题中包含 alias
-	filtered := make([]Message, 0, limit)
-	for _, m := range raw {
-		if strings.Contains(strings.ToLower(m.Subject), strings.ToLower(alias)) ||
-			strings.Contains(strings.ToLower(m.From), strings.ToLower(alias)) ||
-			strings.Contains(strings.ToLower(m.To), strings.ToLower(alias)) {
-			filtered = append(filtered, m)
-			if len(filtered) >= limit {
-				break
-			}
-		}
+// Request fields follow Apple's mail2 queryThreads implementation (2632Build28).
+func threadSearchPayload(text, searchType string, limit int) map[string]any {
+	if limit <= 0 {
+		limit = 20
 	}
-	return filtered, nil
+	payload := map[string]any{
+		"responseType":        "THREAD_DIGEST",
+		"includeFolderStatus": true,
+		"maxResults":          limit,
+		"sessionHeaders": map[string]any{
+			"folder": "INBOX", "modseq": nil, "threadmodseq": nil,
+			"condstore": 1, "qresync": 1, "threadmode": 1,
+		},
+	}
+	if text != "" {
+		payload["searchText"] = text
+		payload["searchType"] = searchType
+	}
+	return payload
 }
 
 func truncate(s string, n int) string {

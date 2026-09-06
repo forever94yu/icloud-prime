@@ -22,7 +22,7 @@ jobs:
           cache: true
 
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
   web:
     name: Web build
@@ -43,3 +43,7 @@ jobs:
       - name: Build
         working-directory: web
         run: npm run build
+
+      - name: Test
+        working-directory: web
+        run: npm test
