@@ -1,7 +1,9 @@
 package createjob
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -382,7 +384,7 @@ func TestPauseSurvivesInFlightCreationResult(t *testing.T) {
 func TestJobMutationsRollBackAfterStoreFailure(t *testing.T) {
 	for _, operation := range []string{"create", "update", "pause", "resume", "delete"} {
 		t.Run(operation, func(t *testing.T) {
-			now := time.Date(2026, 9, 6, 10, 0, 0, 0, time.Local)
+			now := time.Date(2026, 9, 6, 10, 0, 0, 0, time.FixedZone("zero-offset test location", 0))
 			creator := &fakeCreator{}
 			s := newTestScheduler(t, creator, now)
 			s.now = func() time.Time { return now }
@@ -431,8 +433,20 @@ func TestJobMutationsRollBackAfterStoreFailure(t *testing.T) {
 				t.Fatalf("failed %s changed live state: before=%+v, after=%+v", operation, before, jobs)
 			}
 			state, err := s.store.LoadState()
-			if err != nil || !reflect.DeepEqual(state.Jobs, jobs) {
-				t.Fatalf("memory and disk differ after %s failure: %+v, %v", operation, state, err)
+			if err != nil {
+				t.Fatalf("load state after %s failure: %v", operation, err)
+			}
+			// JSON preserves timestamps, not the internal identity of time.Location.
+			diskJSON, err := json.Marshal(state.Jobs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			memoryJSON, err := json.Marshal(jobs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(diskJSON, memoryJSON) {
+				t.Fatalf("memory and disk differ after %s failure: disk=%s, memory=%s", operation, diskJSON, memoryJSON)
 			}
 			if err := os.Remove(s.store.path + ".tmp"); err != nil {
 				t.Fatalf("unblock store: %v", err)
