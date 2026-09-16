@@ -7,6 +7,7 @@ package hme
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -58,6 +59,20 @@ type Alias struct {
 	Label       string `json:"label"`
 	Active      bool   `json:"active"`
 	CreatedAt   string `json:"createdAt,omitempty"`
+}
+
+type responseError struct {
+	status int
+	body   string
+}
+
+func (e *responseError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.status, e.body)
+}
+
+func isAuthenticationError(err error) bool {
+	var response *responseError
+	return errors.As(err, &response) && (response.status == 401 || response.status == 403)
 }
 
 // Client 是 iCloud Hide My Email 客户端。
@@ -220,6 +235,12 @@ func (c *Client) buildURL(rawURL string) string {
 
 // request 执行带重试的 HTTP 请求,返回响应体字符串。
 func (c *Client) request(method, rawURL string, body any, timeout time.Duration, maxAttempts int) (string, error) {
+	// Session requests use the latest cross-host snapshot. Appending the login
+	// jar would send duplicate, potentially stale credentials under the same name.
+	jar := c.httpc.GetCookieJar()
+	c.httpc.SetCookieJar(nil)
+	defer c.httpc.SetCookieJar(jar)
+
 	if timeout == 0 {
 		timeout = RequestTimeout
 	}
@@ -302,7 +323,12 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 
 		// 从 Set-Cookie 响应头更新 Cookie（模拟浏览器行为,iCloud 会刷新 token）
 		for _, sc := range resp.Cookies() {
-			if sc.Name != "" && sc.Value != "" {
+			if sc.MaxAge < 0 || (sc.MaxAge == 0 && !sc.Expires.IsZero() && !sc.Expires.After(time.Now())) {
+				delete(c.Cookies, sc.Name)
+			} else if sc.Name != "" {
+				if c.Cookies == nil {
+					c.Cookies = make(map[string]string)
+				}
 				c.Cookies[sc.Name] = sc.Value
 			}
 		}
@@ -312,7 +338,7 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 			if len(snippet) > 200 {
 				snippet = snippet[:200]
 			}
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet)
+			lastErr = &responseError{status: resp.StatusCode, body: snippet}
 			// 401/403 说明 Cookie 失效,不重试直接返回。
 			if resp.StatusCode == 401 || resp.StatusCode == 403 {
 				return "", lastErr
@@ -375,22 +401,6 @@ func (c *Client) ValidateSession() error {
 	// 剥离 :443 端口——tls-client cookie jar 按无端口 host 存储 cookie,带端口会丢失 cookie → 401
 	if strings.HasSuffix(c.serviceURL, ":443") {
 		c.serviceURL = strings.TrimSuffix(c.serviceURL, ":443")
-	}
-
-	// 获取 serviceURL 后，再次设置 Cookie 到该域名
-	if len(c.Cookies) > 0 {
-		u, _ := url.Parse(c.serviceURL)
-		httpCookies := make([]*http.Cookie, 0, len(c.Cookies))
-		for k, v := range c.Cookies {
-			httpCookies = append(httpCookies, &http.Cookie{
-				Name:  k,
-				Value: v,
-				Path:  "/",
-			})
-		}
-		c.httpc.GetCookies(u) // 触发 cookie jar 初始化
-		// 注意：需要手动设置 cookie，但 tls-client 的 CookieJar 不支持直接设置
-		// 我们需要在请求时手动添加 Cookie 头
 	}
 
 	dsInfo := data.Get("dsInfo")
@@ -526,7 +536,7 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 	if maxRetries <= 0 {
 		maxRetries = 5
 	}
-	var lastErr string
+	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
 			c.serviceURL = ""
@@ -535,8 +545,11 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 		}
 		hme, err := c.Generate()
 		if err != nil {
-			lastErr = "generate 失败: " + err.Error()
+			lastErr = fmt.Errorf("generate 失败: %w", err)
 			c.log("%s", lastErr)
+			if isAuthenticationError(err) {
+				break
+			}
 			if attempt < maxRetries-1 {
 				time.Sleep(time.Second)
 				continue
@@ -545,8 +558,11 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 		}
 		email, err := c.Reserve(hme, label)
 		if err != nil {
-			lastErr = err.Error()
+			lastErr = err
 			c.log("reserve 失败: %s", lastErr)
+			if isAuthenticationError(err) {
+				break
+			}
 			if attempt < maxRetries-1 {
 				time.Sleep(time.Second)
 				continue
@@ -559,8 +575,8 @@ func (c *Client) CreateAlias(label string, maxRetries int) (*CreateResult, error
 			CreatedAt: time.Now().Format(time.RFC3339),
 		}, nil
 	}
-	if lastErr != "" {
-		return nil, fmt.Errorf("创建别名失败: %s", lastErr)
+	if lastErr != nil {
+		return nil, fmt.Errorf("创建别名失败: %w", lastErr)
 	}
 	return nil, fmt.Errorf("创建别名失败,已重试 %d 次", maxRetries)
 }

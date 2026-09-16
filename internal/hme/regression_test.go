@@ -19,6 +19,19 @@ type mockHTTP struct {
 
 func (m mockHTTP) Do(req *http.Request) (*http.Response, error) { return m.do(req) }
 
+func (m mockHTTP) GetCookieJar() http.CookieJar {
+	if m.HttpClient != nil {
+		return m.HttpClient.GetCookieJar()
+	}
+	return nil
+}
+
+func (m mockHTTP) SetCookieJar(jar http.CookieJar) {
+	if m.HttpClient != nil {
+		m.HttpClient.SetCookieJar(jar)
+	}
+}
+
 func mockResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 }

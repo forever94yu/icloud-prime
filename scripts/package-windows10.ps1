@@ -115,46 +115,15 @@ Set-Content -LiteralPath (Join-Path $stageDir "data\accounts.example.json") -Enc
 }
 "@
 
-$releaseNotes = @(
-  "# iCloud Prime v$Version",
-  "",
-  "Windows 10 portable release.",
-  "",
-  "## Windows 10 portable package",
-  "",
-  "Asset:",
-  "",
-  "- $packageName.zip",
-  "",
-  "Usage:",
-  "",
-  "1. Download and extract the zip.",
-  "2. Double-click start.bat.",
-  "3. Open http://127.0.0.1:8081.",
-  "4. Add your own account and configure Cookie or App-specific password.",
-  "5. Create aliases, batch-create aliases, schedule automatic jobs, or read mail.",
-  "6. Use stop.bat to stop the service.",
-  "",
-  "## Security",
-  "",
-  "- The release package contains no real account data.",
-  "- The package only includes accounts.example.json with placeholders.",
-  "- Real account data is saved locally to data\accounts.json after you run the app.",
-  "- If accounts.json is missing, an edited accounts.example.json with real values is imported once.",
-  "- Automatic job data is saved locally to data\create_jobs.json after you create jobs.",
-  "- Do not share data\accounts.json, data\create_jobs.json, Cookie values, or App-specific passwords."
-)
-Set-Content -LiteralPath (Join-Path $outputRootFullPath "v$Version-notes.md") -Encoding ASCII -Value $releaseNotes
-
 $changelogPath = Join-Path $repoRoot "CHANGELOG.md"
-if (Test-Path -LiteralPath $changelogPath) {
-  $changelog = Get-Content -LiteralPath $changelogPath -Raw
-  $escapedVersion = [regex]::Escape($Version)
-  $versionChanges = [regex]::Match($changelog, "(?ms)^## v$escapedVersion[^\r\n]*\r?\n(.*?)(?=^## |\z)")
-  if ($versionChanges.Success) {
-    Add-Content -LiteralPath (Join-Path $outputRootFullPath "v$Version-notes.md") -Encoding UTF8 -Value ("`n## Changes`n" + $versionChanges.Groups[1].Value.Trim())
-  }
+$changelog = Get-Content -LiteralPath $changelogPath -Raw -Encoding UTF8
+$escapedVersion = [regex]::Escape($Version)
+$versionChanges = [regex]::Match($changelog, "(?ms)^## v$escapedVersion(?: -[^\r\n]*)?\r?\n(.*?)(?=^## |\z)")
+if (-not $versionChanges.Success -or [string]::IsNullOrWhiteSpace($versionChanges.Groups[1].Value)) {
+  throw "Missing release changes for v$Version in CHANGELOG.md"
 }
+$releaseNotes = $versionChanges.Groups[1].Value.Trim()
+Set-Content -LiteralPath (Join-Path $outputRootFullPath "v$Version-notes.md") -Encoding UTF8 -Value $releaseNotes
 
 Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath -Force
 

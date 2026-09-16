@@ -98,7 +98,7 @@ Open the Releases page:
 Download:
 
 ```text
-icloud-prime-windows10-portable-v0.1.9.zip
+icloud-prime-windows10-portable-v0.1.10.zip
 ```
 
 ### 2. Extract
@@ -112,7 +112,7 @@ D:\Tools\icloud-prime
 The extracted folder contains:
 
 ```text
-icloud-prime-windows10-portable-v0.1.9/
+icloud-prime-windows10-portable-v0.1.10/
 |-- icloud-prime.exe
 |-- start.bat
 |-- stop.bat
@@ -165,7 +165,9 @@ Do not upload or share that file.
 ### 5. Configure Cookie Values
 
 Cookie authentication is used for Hide My Email alias management and as a Web API mail fallback.
-The app saves refreshed `Set-Cookie` values after successful iCloud requests, but
+The app saves refreshed `Set-Cookie` values from iCloud responses and removes
+values the server deletes or expires. HME requests send each Cookie only once,
+using the latest session values. However,
 Apple can still revoke web sessions. If a VPS IP, proxy, browser session, or
 account security state changes, refresh the Cookie values or log in again from
 the account screen. Keeping each account on a stable host/proxy can reduce
@@ -198,6 +200,21 @@ or:
 ```
 
 If alias creation returns `401` or `403`, refresh your Cookie values.
+The app cannot extend a session that Apple has revoked, and an App-specific
+password only authenticates IMAP mail reading; it cannot renew HME Cookies.
+Copy the complete current iCloud Cookie set, not just one token.
+
+If an automatic job stops after a session error:
+
+1. Open the account screen and update the Cookies or sign in again.
+2. Check that the account is active and refresh its alias list successfully.
+3. Open automatic creation and resume the stopped job.
+
+Updating Cookies does not itself resume an errored job. Resuming a duration
+job starts a new interval of its configured length, while preserving its
+created count and the account's consumed hourly quota. Temporary HTTP
+421/429/5xx or network errors instead keep the job running and retry at the
+next hour. Do not post Cookie values in Issues.
 
 ### 6. Configure an App-Specific Password
 
@@ -282,6 +299,15 @@ Duration-based job:
 5. Enter a label prefix.
 6. Save the job.
 7. Use pause, resume, or delete when needed.
+
+For example, to run for the next 12 hours from 22:36, choose `duration` and
+enter `12`; the original end time is 10:36 the following day. Keep the program
+running. The limit is **up to 5 successful creates per account per calendar
+hour**, using the server's local time, shared with manual and batch creation.
+The scheduler spreads creates across the remaining hour and resets the quota
+at the next full hour. It does not create a batch of 5 exactly at :36 each hour,
+and a 12-hour job does not guarantee exactly 60 aliases. Partial hours, existing
+quota usage, session expiration, and upstream throttling can affect the total.
 
 Daily-window job:
 

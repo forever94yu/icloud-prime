@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.10 - 2026-09-16
+
+- Fix duplicate and stale session Cookies being sent together during iCloud session validation and Hide My Email requests.
+- Honor Cookie deletion and expiration responses so revoked values are not saved or sent again.
+- Stop retrying alias creation with the same expired credentials after HTTP 401 or 403.
+- Clarify 12-hour automatic creation, per-calendar-hour quotas, and how to update Cookies and resume interrupted jobs.
+
 ## v0.1.9 - 2026-09-06
 
 - Preserve account credentials when redacting API responses, isolate Cookie snapshots across requests, and roll back account changes when persistence fails.
