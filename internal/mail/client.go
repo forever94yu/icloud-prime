@@ -15,6 +15,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -51,10 +52,15 @@ type Folder struct {
 }
 
 // FullMessage 是一封邮件的完整内容(含正文)。
+//
+// HTMLBody 保存原始 HTML,让链接等正文结构不丢失;Links 是从中提取的
+// 可点击 http/https 链接,按出现顺序去重。
 type FullMessage struct {
 	Message
-	Body        string `json:"body"`
-	ContentType string `json:"content_type"`
+	Body        string   `json:"body"`
+	HTMLBody    string   `json:"html_body,omitempty"`
+	Links       []string `json:"links,omitempty"`
+	ContentType string   `json:"content_type"`
 }
 
 // Client 是 iCloud 邮件 IMAP 客户端。
@@ -435,8 +441,10 @@ func (c *Client) GetFullBatchInFolder(folder string, uids []uint32) ([]*FullMess
 		full := &FullMessage{Message: message}
 		if r := msg.GetBody(section); r != nil {
 			if em, err := mail.ReadMessage(r); err == nil {
-				if body, err := readBody(em); err == nil {
-					full.Body = strings.TrimSpace(body)
+				if parts, err := readMIMEParts(em.Header, em.Body); err == nil {
+					full.Body = strings.TrimSpace(parts.text)
+					full.HTMLBody = strings.TrimSpace(parts.html)
+					full.Links = extractLinks(full.HTMLBody)
 					full.Preview = full.Body
 				}
 				full.ContentType = em.Header.Get("Content-Type")
@@ -714,14 +722,51 @@ var (
 	htmlNoscriptBlock = regexp.MustCompile(`(?is)<noscript[^>]*>.*?</noscript>`)
 	htmlTag           = regexp.MustCompile(`<[^>]+>`)
 	blankLines        = regexp.MustCompile(`\n{3,}`)
+	hrefAttr          = regexp.MustCompile(`(?is)href\s*=\s*(?:"([^"]*)"|'([^']*)')`)
 )
+
+// extractLinks 按出现顺序返回 HTML 中可点击的 http/https 链接(去重)。
+func extractLinks(markup string) []string {
+	if markup == "" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var links []string
+	for _, match := range hrefAttr.FindAllStringSubmatch(markup, -1) {
+		raw := match[1]
+		if raw == "" {
+			raw = match[2]
+		}
+		link := strings.TrimSpace(stdhtml.UnescapeString(raw))
+		u, err := url.Parse(link)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			continue
+		}
+		if seen[link] {
+			continue
+		}
+		seen[link] = true
+		links = append(links, link)
+	}
+	return links
+}
+
+// bodyParts 是解析后的正文:纯文本与原始 HTML。
+type bodyParts struct {
+	text string
+	html string
+}
 
 // readBody 读取邮件正文,优先 text/plain,其次从 HTML 提取纯文本。
 func readBody(msg *mail.Message) (string, error) {
-	return readMIMEBody(msg.Header, msg.Body)
+	parts, err := readMIMEParts(msg.Header, msg.Body)
+	if err != nil {
+		return "", err
+	}
+	return parts.text, nil
 }
 
-func readMIMEBody(header mail.Header, body io.Reader) (string, error) {
+func readMIMEParts(header mail.Header, body io.Reader) (bodyParts, error) {
 	ct := header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(ct)
 	if err != nil {
@@ -732,26 +777,26 @@ func readMIMEBody(header mail.Header, body io.Reader) (string, error) {
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
 		if boundary == "" {
-			return "", fmt.Errorf("multipart 邮件缺少 boundary")
+			return bodyParts{}, fmt.Errorf("multipart 邮件缺少 boundary")
 		}
-		return readMultipartBody(body, boundary)
+		return readMultipartParts(body, boundary)
 	}
 
 	raw, err := io.ReadAll(decodeTransfer(header.Get("Content-Transfer-Encoding"), body))
 	if err != nil {
-		return "", err
+		return bodyParts{}, err
 	}
 	text := decodeBodyCharset(raw, ct)
 	if mediaType == "text/html" {
-		return stripHTML(text), nil
+		return bodyParts{text: stripHTML(text), html: text}, nil
 	}
-	return text, nil
+	return bodyParts{text: text}, nil
 }
 
-func readMultipartBody(body io.Reader, boundary string) (string, error) {
+func readMultipartParts(body io.Reader, boundary string) (bodyParts, error) {
 	mr := multipart.NewReader(body, boundary)
+	var parts bodyParts
 	var firstText string
-	var htmlFallback string
 
 	for {
 		part, err := mr.NextPart()
@@ -759,7 +804,7 @@ func readMultipartBody(body io.Reader, boundary string) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", err
+			return bodyParts{}, err
 		}
 
 		disposition, _, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
@@ -773,31 +818,43 @@ func readMultipartBody(body io.Reader, boundary string) (string, error) {
 			part.Close()
 			continue
 		}
-		text, err := readMIMEBody(mail.Header(part.Header), part)
+		nested, err := readMIMEParts(mail.Header(part.Header), part)
 		if err != nil {
 			continue
 		}
-		text = strings.TrimSpace(text)
-		if text == "" {
-			continue
-		}
+		text := strings.TrimSpace(nested.text)
+		htmlBody := strings.TrimSpace(nested.html)
 
-		if strings.HasPrefix(partType, "text/plain") {
-			return text, nil
-		}
-		if strings.HasPrefix(partType, "text/html") && htmlFallback == "" {
-			htmlFallback = text
-			continue
-		}
-		if firstText == "" {
-			firstText = text
+		switch {
+		case strings.HasPrefix(partType, "multipart/"):
+			if parts.text == "" {
+				parts.text = text
+			}
+			if parts.html == "" {
+				parts.html = htmlBody
+			}
+		case strings.HasPrefix(partType, "text/plain"):
+			if parts.text == "" && text != "" {
+				parts.text = text
+			}
+		case strings.HasPrefix(partType, "text/html"):
+			if parts.html == "" && htmlBody != "" {
+				parts.html = htmlBody
+			}
+		default:
+			if firstText == "" && text != "" {
+				firstText = text
+			}
 		}
 	}
 
-	if htmlFallback != "" {
-		return htmlFallback, nil
+	if parts.text == "" {
+		parts.text = firstText
 	}
-	return firstText, nil
+	if parts.text == "" && parts.html != "" {
+		parts.text = stripHTML(parts.html)
+	}
+	return parts, nil
 }
 
 func decodeTransfer(encoding string, body io.Reader) io.Reader {

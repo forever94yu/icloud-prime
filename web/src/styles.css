@@ -1077,6 +1077,45 @@ h1 {
   color: var(--muted);
 }
 
+.mail-modal-links {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-solid);
+}
+
+.mail-modal-links-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.mail-modal-links-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.mail-modal-links ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mail-modal-links a {
+  color: var(--blue);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
 .code-panel {
   padding: 20px;
   border-radius: 20px;

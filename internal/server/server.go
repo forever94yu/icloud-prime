@@ -14,6 +14,7 @@ import (
 	"maps"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -206,6 +207,7 @@ func cloneFullMessage(message *mail.FullMessage) *mail.FullMessage {
 		return nil
 	}
 	clone := *message
+	clone.Links = slices.Clone(message.Links)
 	return &clone
 }
 
