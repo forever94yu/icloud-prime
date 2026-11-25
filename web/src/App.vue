@@ -324,6 +324,8 @@ const modalLinks = computed(() => {
   if (busy.value.message) return [];
   return modalMessage.value?.links ?? [];
 });
+const copiedLink = ref("");
+let copiedLinkTimer: ReturnType<typeof setTimeout> | undefined;
 const extractedCodes = computed(() =>
   visibleMessages.value
     .map((message) => ({ message, code: extractVerificationCode(message) }))
@@ -782,15 +784,27 @@ async function selectMessage(message: Message) {
 
 function closeMailModal() {
   mailModalOpen.value = false;
+  copiedLink.value = "";
 }
 
 async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text);
     notice.value = "已复制到剪贴板";
+    return true;
   } catch {
     error.value = "无法访问剪贴板，请使用 HTTPS 或本机地址。";
+    return false;
   }
+}
+
+async function copyModalLink(link: string) {
+  if (!(await copyText(link))) return;
+  copiedLink.value = link;
+  clearTimeout(copiedLinkTimer);
+  copiedLinkTimer = setTimeout(() => {
+    copiedLink.value = "";
+  }, 1600);
 }
 
 function clearAliasSelection() {
@@ -1428,7 +1442,19 @@ onMounted(async () => {
             </div>
 
             <div v-if="modalLinks.length" class="mail-modal-links">
-              <p class="mail-modal-links-title">邮件中的链接</p>
+              <div class="mail-modal-links-head">
+                <p class="mail-modal-links-title">邮件中的链接</p>
+                <button
+                  class="mini-button"
+                  type="button"
+                  :aria-label="copiedLink === modalLinks[0] ? '已复制链接' : '复制首个链接'"
+                  :title="copiedLink === modalLinks[0] ? '已复制' : '复制首个链接'"
+                  @click="copyModalLink(modalLinks[0])"
+                >
+                  <CheckCircle2 v-if="copiedLink === modalLinks[0]" :size="15" />
+                  <Copy v-else :size="15" />
+                </button>
+              </div>
               <ul>
                 <li v-for="link in modalLinks" :key="link">
                   <a :href="link" target="_blank" rel="noopener noreferrer">{{ link }}</a>

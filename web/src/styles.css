@@ -1085,8 +1085,16 @@ h1 {
   background: var(--surface-solid);
 }
 
+.mail-modal-links-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
 .mail-modal-links-title {
-  margin: 0 0 10px;
+  margin: 0;
   color: var(--muted);
   font-size: 13px;
   font-weight: 600;
