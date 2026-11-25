@@ -448,6 +448,21 @@ Response:
 }
 ```
 
+`body` is the readable plain text of the message. When the message has a
+`text/html` part, the response also carries `html_body` (raw HTML) and `links`
+(`http`/`https` links in document order, de-duplicated):
+
+```json
+{
+  "body": "Join workspace",
+  "html_body": "<p>Join <a href=\"https://example.com/join?token=abc\">workspace</a></p>",
+  "links": ["https://example.com/join?token=abc"],
+  "content_type": "multipart/alternative; boundary=..."
+}
+```
+
+Both fields are omitted when the message is plain text only.
+
 Full-message responses are cached briefly so repeated modal opens do not need to
 fetch the same IMAP body again.
 

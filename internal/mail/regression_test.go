@@ -109,6 +109,43 @@ func TestReadBodyIgnoresTextAttachments(t *testing.T) {
 	}
 }
 
+func TestReadMIMEPartsKeepsHTMLAndPrefersPlainText(t *testing.T) {
+	raw := "Content-Type: multipart/alternative; boundary=x\r\n\r\n" +
+		"--x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Join <a href=\"https://example.com/join?a=1&amp;b=2\">workspace</a></p>\r\n" +
+		"--x\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nJoin workspace\r\n" +
+		"--x--\r\n"
+	message, err := netmail.ReadMessage(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := readMIMEParts(message.Header, message.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parts.text != "Join workspace" {
+		t.Fatalf("plain text should win, got %q", parts.text)
+	}
+	if !strings.Contains(parts.html, `href="https://example.com/join?a=1&amp;b=2"`) {
+		t.Fatalf("html body was lost: %q", parts.html)
+	}
+}
+
+func TestExtractLinksDedupesAndUnescapes(t *testing.T) {
+	markup := `<a href="https://example.com/join?a=1&amp;b=2">Join</a>` +
+		`<a href='https://example.com/join?a=1&amp;b=2'>Join again</a>` +
+		`<a href="mailto:help@example.com">Help</a>` +
+		`<a href="/relative">Relative</a>` +
+		`<img src="https://example.com/logo.png">`
+	links := extractLinks(markup)
+	want := []string{"https://example.com/join?a=1&b=2"}
+	if len(links) != len(want) || links[0] != want[0] {
+		t.Fatalf("wrong links: %v", links)
+	}
+	if links := extractLinks(""); links != nil {
+		t.Fatalf("empty markup should have no links: %v", links)
+	}
+}
+
 func TestIMAPUnreadDistinguishesUnknownAndSeen(t *testing.T) {
 	unknown := toMessage(&imap.Message{}, "INBOX")
 	if unknown.Unread != nil {

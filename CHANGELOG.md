@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- Return `html_body` and extracted `links` for full messages, and show the links as clickable anchors in the web console mail detail so HTML-only buttons such as invitation links are no longer lost.
+
 ## v0.1.10 - 2026-09-16
 
 - Fix duplicate and stale session Cookies being sent together during iCloud session validation and Hide My Email requests.

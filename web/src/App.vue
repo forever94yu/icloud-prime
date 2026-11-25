@@ -59,6 +59,8 @@ type Message = {
   date: string;
   preview: string;
   body?: string;
+  html_body?: string;
+  links?: string[];
   unread?: boolean;
 };
 
@@ -317,6 +319,10 @@ const modalBody = computed(() => {
   if (busy.value.message) return "正在读取正文...";
   if (modalMessage.value?.uid && busy.value.prefetch && !modalMessage.value.body) return "正文后台加载中...";
   return modalMessage.value?.body || modalMessage.value?.preview || "无正文摘要";
+});
+const modalLinks = computed(() => {
+  if (busy.value.message) return [];
+  return modalMessage.value?.links ?? [];
 });
 const extractedCodes = computed(() =>
   visibleMessages.value
@@ -1419,6 +1425,15 @@ onMounted(async () => {
 
             <div class="mail-modal-body" :class="{ loading: busy.message }">
               <p>{{ modalBody }}</p>
+            </div>
+
+            <div v-if="modalLinks.length" class="mail-modal-links">
+              <p class="mail-modal-links-title">邮件中的链接</p>
+              <ul>
+                <li v-for="link in modalLinks" :key="link">
+                  <a :href="link" target="_blank" rel="noopener noreferrer">{{ link }}</a>
+                </li>
+              </ul>
             </div>
           </div>
         </section>
